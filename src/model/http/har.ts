@@ -23,7 +23,7 @@ import { isHttpExchange } from './exchange';
 import { getStatusMessage } from './http-docs';
 
 // We only include request/response bodies that are under 500KB
-const HAR_BODY_SIZE_LIMIT = 500000;
+const HAR_BODY_SIZE_LIMIT = 50000000;
 const UTF8Decoder = new TextDecoder('utf8', { fatal: true });
 
 export interface Har extends HarFormat.Har {
