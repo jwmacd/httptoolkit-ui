@@ -8,7 +8,7 @@ import { CollectedEvent } from '../../types';
 import { saveFile, uploadFile, Ctrl } from '../../util/ui';
 
 import { AccountStore } from '../../model/account/account-store';
-import { EventsStore } from '../../model/http/events-store';
+import { EventsStore } from '../../model/events/events-store';
 import { generateHar } from '../../model/http/har';
 import { reportError } from '../../errors';
 import { formatAjvError } from '../../util/json-schema';
@@ -82,7 +82,7 @@ export const ImportHarButton = inject('eventsStore', 'accountStore')(
                     try {
                         data = JSON.parse(uploadedFile);
                         await props.eventsStore!.loadFromHar(data);
-                    } catch (error) {
+                    } catch (error: any) {
                         reportError(error);
 
                         if (error.name === 'HARError' && error.errors) {
@@ -99,7 +99,7 @@ export const ImportHarButton = inject('eventsStore', 'accountStore')(
                             alert(dedent`
                                 Could not parse HAR file.
 
-                                ${error.message}
+                                ${error.message || error}
                             `);
                         }
                     }

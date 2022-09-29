@@ -3,26 +3,40 @@ import type { ComponentClass } from 'react';
 import type {
     InitiatedRequest as MockttpInitiatedRequest,
     CompletedRequest as MockttpCompletedRequest,
-    CompletedResponse as MockttpResponse
+    CompletedResponse as MockttpResponse,
+    WebSocketMessage as MockttpWebSocketMessage,
+    WebSocketClose as MockttpWebSocketClose,
+    SubscribableEvent as MockttpEvent
 } from 'mockttp';
 import type {
     Headers,
     TimingEvents,
-    TlsRequest,
+    TlsRequest as TLSRequest,
     ClientError
 } from 'mockttp/dist/types';
 import type { PortRange } from 'mockttp/dist/mockttp';
 import type {
     PassThroughResponse as MockttpBreakpointedResponse,
     CallbackRequestResult as MockttpBreakpointRequestResult,
-    CallbackResponseResult as MockttpBreakpointResponseResult,
-    SerializedBuffer as MockttpSerializedBuffer
+    CallbackResponseResult as MockttpBreakpointResponseResult
 } from 'mockttp/dist/rules/requests/request-handlers';
+import type {
+    SerializedBuffer as MockttpSerializedBuffer
+} from 'mockttp/dist/rules/requests/request-handler-definitions';
+
+import * as MockRTC from 'mockrtc';
 
 import type { ObservablePromise } from './util/observable';
+
+import type { FailedTLSConnection } from './model/events/failed-tls-connection';
 import type { HttpExchange } from './model/http/exchange';
+import type { WebSocketStream } from './model/websockets/websocket-stream';
+import type { RTCConnection } from './model/webrtc/rtc-connection';
+import type { RTCDataChannel } from './model/webrtc/rtc-data-channel';
+import type { RTCMediaTrack } from './model/webrtc/rtc-media-track';
+
 import type { TrafficSource } from './model/http/sources';
-import type { ViewableContentType } from './model/http/content-types';
+import type { ViewableContentType } from './model/events/content-types';
 
 export type HarBody = { encodedLength: number, decoded: Buffer };
 export type HarRequest = Omit<MockttpCompletedRequest, 'body' | 'timingEvents' | 'matchedRuleId'> &
@@ -30,13 +44,35 @@ export type HarRequest = Omit<MockttpCompletedRequest, 'body' | 'timingEvents' |
 export type HarResponse = Omit<MockttpResponse, 'body' | 'timingEvents'> &
     { body: HarBody; timingEvents: TimingEvents };
 
+export type InputHTTPEvent = MockttpEvent;
 export type InputClientError = ClientError;
-export type InputTlsRequest = TlsRequest;
+export type InputTLSRequest = TLSRequest;
 export type InputInitiatedRequest = MockttpInitiatedRequest;
 export type InputCompletedRequest = MockttpCompletedRequest | HarRequest;
 export type InputRequest = InputInitiatedRequest | InputCompletedRequest;
 export type InputResponse = MockttpResponse | HarResponse;
 export type InputMessage = InputRequest | InputResponse;
+
+export type InputWebSocketMessage = MockttpWebSocketMessage;
+export type InputWebSocketClose = MockttpWebSocketClose;
+
+// Map from event name to data for each MockRTC event:
+export type InputRTCEventData = MockRTC.MockRTCEventData;
+export type InputRTCEvent = keyof InputRTCEventData;
+
+export type InputRTCPeerConnected = InputRTCEventData['peer-connected'];
+export type InputRTCExternalPeerAttached = InputRTCEventData['external-peer-attached'];
+export type InputRTCPeerDisconnected = InputRTCEventData['peer-disconnected'];
+export type InputRTCDataChannelOpened = InputRTCEventData['data-channel-opened'];
+export type InputRTCDataChannelClosed = InputRTCEventData['data-channel-closed'];
+export type InputRTCMessage =
+    | InputRTCEventData['data-channel-message-received']
+    | InputRTCEventData['data-channel-message-sent'];
+export type InputRTCMediaTrackOpened = InputRTCEventData['media-track-opened'];
+export type InputRTCMediaStats = InputRTCEventData['media-track-stats'];
+export type InputRTCMediaTrackClosed = InputRTCEventData['media-track-closed'];
+
+export type InputStreamMessage = InputRTCMessage | InputWebSocketMessage;
 
 export interface BreakpointBody {
     decoded: Buffer;
@@ -72,12 +108,6 @@ export {
     MockttpBreakpointedResponse,
 };
 
-export type FailedTlsRequest = InputTlsRequest & {
-    id: string;
-    searchIndex: string;
-    pinned: boolean;
-}
-
 export type HtkRequest = Omit<InputRequest, 'body' | 'path'> & {
     parsedUrl: URL & { parseable: boolean },
     source: TrafficSource,
@@ -99,11 +129,24 @@ export type MessageBody = {
     cleanup(): void
 };
 
-export type { HttpExchange };
+export type {
+    FailedTLSConnection,
+    HttpExchange,
+    WebSocketStream,
+    RTCConnection,
+    RTCDataChannel,
+    RTCMediaTrack
+};
 export type CollectedEvent =
+    | FailedTLSConnection
     | HttpExchange
-    | FailedTlsRequest;
+    | WebSocketStream
+    | RTCConnection
+    | RTCDataChannel
+    | RTCMediaTrack;
+
 export type ExchangeMessage = HtkRequest | HtkResponse;
+export type RTCStream = RTCDataChannel | RTCMediaTrack;
 
 export {
     Headers,

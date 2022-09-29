@@ -3,16 +3,16 @@ import * as React from 'react';
 import { inject, observer } from 'mobx-react';
 
 import { styled } from '../../styles';
+import { UnreachableCheck } from '../../util/error';
 
 import { RulesStore } from '../../model/rules/rules-store';
 import { AccountStore } from '../../model/account/account-store';
 import {
     HandlerClass,
     Handler,
-    HandlerClassKey,
-    HandlerKeys,
-    HandlerLookup,
-    isPaidHandlerClass
+    AvailableHandlerKey,
+    HandlerClassKeyLookup,
+    isPaidHandlerClass,
 } from '../../model/rules/rules';
 import { summarizeHandlerClass } from '../../model/rules/rule-descriptions';
 import {
@@ -26,30 +26,27 @@ import {
     TimeoutHandler,
     CloseConnectionHandler,
     FromFileResponseHandler
-} from '../../model/rules/rule-definitions';
+} from '../../model/rules/definitions/http-rule-definitions';
+import {
+    WebSocketPassThroughHandler,
+    EchoWebSocketHandlerDefinition,
+    RejectWebSocketHandlerDefinition,
+    ListenWebSocketHandlerDefinition
+} from '../../model/rules/definitions/websocket-rule-definitions';
 
 import { Select } from '../common/inputs';
-import {
-    serverVersion,
-    versionSatisfies,
-    FROM_FILE_HANDLER_SERVER_RANGE,
-    PASSTHROUGH_TRANSFORMS_RANGE
-} from '../../services/service-versions';
 
 const getHandlerKey = (h: HandlerClass | Handler) =>
-    HandlerKeys.get(h as any) || HandlerKeys.get(h.constructor as any);
-const getHandlerClassByKey = (k: HandlerClassKey) => HandlerLookup[k];
+    HandlerClassKeyLookup.get(h as any) || HandlerClassKeyLookup.get(h.constructor as any);
 
 const HandlerOptions = (p: { handlers: Array<HandlerClass> }) => <>{
     p.handlers.map((handler): JSX.Element | null => {
-        const key = getHandlerKey(handler);
-        const description = summarizeHandlerClass(handler);
+        const key = getHandlerKey(handler)!;
+        const description = summarizeHandlerClass(key);
 
-        return description
-            ? <option key={key} value={key}>
-                { description }
-            </option>
-            : null;
+        return <option key={key} value={key}>
+            { description }
+        </option>;
     })
 }</>;
 
@@ -58,78 +55,69 @@ const HandlerSelect = styled(Select)`
 `;
 
 const instantiateHandler = (
-    handlerClass: HandlerClass,
+    handlerKey: AvailableHandlerKey,
     rulesStore: RulesStore
-): Handler | undefined => {
-    switch (handlerClass) {
-        case StaticResponseHandler:
+): Handler => {
+    switch (handlerKey) {
+        case 'simple':
             return new StaticResponseHandler(200);
-        case FromFileResponseHandler:
+        case 'file':
             return new FromFileResponseHandler(200, undefined, '');
-        case PassThroughHandler:
+        case 'passthrough':
             return new PassThroughHandler(rulesStore);
-        case ForwardToHostHandler:
+        case 'ws-passthrough':
+            return new WebSocketPassThroughHandler(rulesStore);
+        case 'forward-to-host':
             return new ForwardToHostHandler('', true, rulesStore);
-        case TransformingHandler:
+        case 'req-res-transformer':
             return new TransformingHandler(rulesStore, {}, {});
-        case RequestBreakpointHandler:
+        case 'request-breakpoint':
             return new RequestBreakpointHandler(rulesStore);
-        case ResponseBreakpointHandler:
+        case 'response-breakpoint':
             return new ResponseBreakpointHandler(rulesStore);
-        case RequestAndResponseBreakpointHandler:
+        case 'request-and-response-breakpoint':
             return new RequestAndResponseBreakpointHandler(rulesStore);
-        case TimeoutHandler:
+        case 'timeout':
             return new TimeoutHandler();
-        case CloseConnectionHandler:
+        case 'close-connection':
             return new CloseConnectionHandler();
+        case 'ws-echo':
+            return new EchoWebSocketHandlerDefinition();
+        case 'ws-reject':
+            return new RejectWebSocketHandlerDefinition(400);
+        case 'ws-listen':
+            return new ListenWebSocketHandlerDefinition();
+        default:
+            throw new UnreachableCheck(handlerKey);
     }
 }
-
-const supportsFileHandlers = () =>
-    _.isString(serverVersion.value) &&
-    versionSatisfies(serverVersion.value, FROM_FILE_HANDLER_SERVER_RANGE);
-
-const supportsTransforms = () =>
-    _.isString(serverVersion.value) &&
-    versionSatisfies(serverVersion.value, PASSTHROUGH_TRANSFORMS_RANGE);
 
 export const HandlerSelector = inject('rulesStore', 'accountStore')(observer((p: {
     rulesStore?: RulesStore,
     accountStore?: AccountStore,
+    availableHandlers: Array<HandlerClass>,
     value: Handler,
     onChange: (handler: Handler) => void
 }) => {
-    const allHandlers = [
-        StaticResponseHandler,
-        supportsFileHandlers() && FromFileResponseHandler,
-        PassThroughHandler,
-        ForwardToHostHandler,
-        supportsTransforms() && TransformingHandler,
-        RequestBreakpointHandler,
-        ResponseBreakpointHandler,
-        RequestAndResponseBreakpointHandler,
-        TimeoutHandler,
-        CloseConnectionHandler
-    ].filter(Boolean);
-
-    // Do some type tricks to make TS understand that we've filtered 'false' out of the handlers.
-    type DefinedHandler = Exclude<typeof allHandlers[number], false>;
-
-    const [ availableHandlers, needProHandlers ] = _.partition<DefinedHandler>(
-        allHandlers as DefinedHandler[],
+    let [ allowedHandlers, needProHandlers ] = _.partition(
+        p.availableHandlers,
         (handlerClass) => p.accountStore!.isPaidUser || !isPaidHandlerClass(handlerClass)
+    );
+
+    // Pull the breakpoint handlers to the top, since they're kind of separate
+    allowedHandlers = _.sortBy(allowedHandlers, h =>
+        getHandlerKey(h)!.includes('breakpoint') ? 0 : 1
     );
 
     return <HandlerSelect
         value={getHandlerKey(p.value)}
         onChange={(event) => {
-            const handlerClass = getHandlerClassByKey(event.target.value as HandlerClassKey);
-            const handler = instantiateHandler(handlerClass, p.rulesStore!);
-            if (!handler) return;
+            const handlerKey = event.target.value as AvailableHandlerKey;
+            const handler = instantiateHandler(handlerKey, p.rulesStore!);
             p.onChange(handler);
         }}
     >
-        <HandlerOptions handlers={availableHandlers} />
+        <HandlerOptions handlers={allowedHandlers} />
         { needProHandlers.length &&
             <optgroup label='With HTTP Toolkit Pro:'>
                 <HandlerOptions handlers={needProHandlers} />

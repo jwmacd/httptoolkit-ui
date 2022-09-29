@@ -76,6 +76,7 @@ const InterceptOptionCard = styled(LittleCard)<{
 }>`
     height: 100%;
     width: 100%;
+    overflow: hidden;
 
     ${p => {
         if (!p.expanded || !p.uiConfig) {
@@ -138,6 +139,7 @@ const LoadingOverlay = styled.div`
 `;
 
 export const StatusPill = styled(Pill)`
+    white-space: normal; /* Useful for layout in tiny screens, e.g. the 'proxy port' badge */
     && { margin: auto 0 0 0; }
 `;
 

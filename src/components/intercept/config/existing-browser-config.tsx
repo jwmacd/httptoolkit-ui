@@ -3,8 +3,6 @@ import { observer } from 'mobx-react';
 import { observable } from 'mobx';
 import dedent from 'dedent';
 
-import { trackEvent } from '../../../tracking';
-
 import { Interceptor } from '../../../model/interception/interceptors';
 
 @observer
@@ -19,8 +17,6 @@ class ExistingBrowserConfig extends React.Component<{
     closeSelf: () => void
 }> {
 
-    @observable serverPort?: number;
-
     async componentDidMount() {
         const { activateInterceptor, reportStarted, reportSuccess, closeSelf } = this.props;
         closeSelf(); // We immediately unmount, but continue activating:
@@ -31,7 +27,7 @@ class ExistingBrowserConfig extends React.Component<{
 
             // Only it runs without confirmation does this count as an activation
             reportStarted();
-        } catch (error) {
+        } catch (error: any) {
             if (!error.metadata || error.metadata.closeConfirmRequired !== true) {
                 // This is a real error, not a confirmation requirement.
 

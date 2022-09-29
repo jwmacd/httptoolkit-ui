@@ -11,6 +11,7 @@ import { styled } from '../../styles';
 import { Icon } from '../../icons';
 import { uploadFile } from '../../util/ui';
 import { attempt } from '../../util/promise';
+import { asError } from '../../util/error';
 
 import { buildApiMetadataAsync } from '../../services/ui-worker-api';
 
@@ -23,6 +24,7 @@ import { SettingsButton, SettingsExplanation } from './settings-components';
 import { TextInput } from '../common/inputs';
 import { ApiStore } from '../../model/api/api-store';
 import { ContentLabel } from '../common/text-content';
+import { ApiMetadata } from '../../model/api/api-interfaces';
 
 const UploadSpecButton = styled(SettingsButton).attrs(() => ({
     type: 'submit'
@@ -70,7 +72,7 @@ function updateValidationMessage(element: HTMLInputElement | HTMLButtonElement, 
 @inject('apiStore')
 @observer
 export class ApiSettingsCard extends React.Component<
-    Omit<CollapsibleCardProps, 'children'> & {
+    CollapsibleCardProps & {
         apiStore?: ApiStore
     }
 > {
@@ -225,7 +227,7 @@ export class ApiSettingsCard extends React.Component<
             }
         } catch (e) {
             console.log(e);
-            updateValidationMessage(this.uploadSpecButtonRef.current!, e.message);
+            updateValidationMessage(this.uploadSpecButtonRef.current!, asError(e).message);
         } finally {
             this.specUploadInProgress = false;
         }
@@ -265,11 +267,11 @@ export class ApiSettingsCard extends React.Component<
             this.baseUrlError = undefined;
             updateValidationMessage(input);
         } catch (e) {
-            this.baseUrlError = e;
+            this.baseUrlError = asError(e);
             updateValidationMessage(input,
                 e instanceof TypeError
                     ? "Not a valid URL"
-                    : e.message
+                    : asError(e).message
             );
         }
     }
@@ -277,7 +279,7 @@ export class ApiSettingsCard extends React.Component<
     saveApi = flow(function * (this: ApiSettingsCard) {
         const baseUrl = this.enteredBaseUrl.replace(/https?:\/\//, '');
 
-        const api = yield buildApiMetadataAsync(
+        const api: ApiMetadata = yield buildApiMetadataAsync(
             this.selectedSpec!,
             ['http://' + baseUrl, 'https://' + baseUrl]
         );

@@ -71,6 +71,11 @@ export class AccountStore {
         // Include the user email in error reports whilst they're logged in.
         // Useful generally, but especially for checkout/subscription issues.
         reportErrorsAsUser(this.user.email);
+
+        if (this.user.banned) {
+            alert('Your account has been blocked for abuse. Please contact help@httptoolkit.tech.');
+            window.close();
+        }
     }.bind(this));
 
     readonly subscriptionPlans = SubscriptionPlans;
@@ -160,11 +165,35 @@ export class AccountStore {
                 return;
             }
 
+            const isRiskyPayment = this.subscriptionPlans[selectedPlan].prices?.currency === 'BRL' &&
+                this.userEmail?.endsWith('@gmail.com'); // So far, all chargebacks have been from gmail accounts
+
+            const newUser = !this.user.subscription; // Even cancelled users will have an expired subscription left
+            if (newUser && isRiskyPayment) {
+                // This is annoying, I wish we didn't have to do this, but fraudulent BRL payments are now 80% of chargebacks,
+                // and we need to tighten this up and block that somehow or payment platforms will eventually block
+                // HTTP Toolkit globally. This error message is left intentionally vague to try and discourage fraudsters
+                // from using a VPN to work around it. We do still allow this for existing customers, who are already
+                // logged in - we're attempting to just block the creation of new accounts here.
+
+                trackEvent({ category: 'Account', action: 'Blocked purchase', label: selectedPlan });
+
+                alert(
+                    "Unfortunately, due to high levels of recent chargebacks & fraud, subscriptions for new accounts "+
+                    "will temporarily require manual validation & processing before setup.\n\n" +
+                    "Please email purchase@httptoolkit.tech to begin this process."
+                );
+
+                return;
+            }
+
             // Otherwise, it's checkout time, and the rest is in the hands of Paddle
             yield this.purchasePlan(this.user.email!, selectedPlan);
-        } catch (error) {
+        } catch (error: any) {
             reportError(error);
-            alert(`${error.message || error.code || 'Error'}\n\nPlease check your email for details.\nIf you need help, get in touch at billing@httptoolkit.tech.`);
+            alert(`${
+                error.message || error.code || 'Error'
+            }\n\nPlease check your email for details.\nIf you need help, get in touch at billing@httptoolkit.tech.`);
             this.modal = undefined;
         }
     }.bind(this));

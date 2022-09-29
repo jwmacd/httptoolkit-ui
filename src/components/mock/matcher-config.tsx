@@ -4,15 +4,25 @@ import { observable, action, autorun, runInAction, reaction } from 'mobx';
 import { observer, disposeOnUnmount } from 'mobx-react';
 import * as Randexp from 'randexp';
 
-import { matchers } from "mockttp";
+import { matchers, Method } from "mockttp";
 
 import { Headers } from '../../types';
 import { css, styled } from '../../styles';
+
 import { tryParseJson } from '../../util';
+import { asError, UnreachableCheck } from '../../util/error';
 
-import { Matcher, MatcherClass, MatcherLookup, MatcherClassKey } from "../../model/rules/rules";
+import {
+    Matcher,
+    MatcherClass,
+    MatcherClassKeyLookup,
+    AdditionalMatcherKey
+} from "../../model/rules/rules";
+import {
+    WebSocketMethodMatcher
+} from '../../model/rules/definitions/websocket-rule-definitions';
 
-import { TextInput } from '../common/inputs';
+import { Select, TextInput } from '../common/inputs';
 import { EditablePairs, PairsArray } from '../common/editable-pairs';
 import { EditableHeaders } from '../common/editable-headers';
 import { ThemedSelfSizedEditor } from '../editor/base-editor';
@@ -36,9 +46,13 @@ export function MatcherConfiguration(props:
 ) {
     const { matcher } = props as { matcher?: Matcher };
 
-    const matcherClass = 'matcher' in props
-        ? MatcherLookup[props.matcher.type as MatcherClassKey]
-        : props.matcherClass!;
+    const matcherKey = ('matcher' in props
+        ? props.matcher.type
+        : MatcherClassKeyLookup.get(props.matcherClass!)
+    ) as AdditionalMatcherKey | undefined;
+
+    // If no there's matcher class selected, we have no config to show:
+    if (!matcherKey) return null;
 
     const configProps = {
         matcher: matcher as any,
@@ -47,29 +61,31 @@ export function MatcherConfiguration(props:
         onInvalidState: props.onInvalidState || _.noop
     };
 
-    switch (matcherClass) {
-        case matchers.HostMatcher:
+    switch (matcherKey) {
+        case 'method':
+            return <WsMethodMatcherConfig {...configProps} />;
+        case 'host':
             return <HostMatcherConfig {...configProps} />;
-        case matchers.SimplePathMatcher:
+        case 'simple-path':
             return <SimplePathMatcherConfig {...configProps} />;
-        case matchers.RegexPathMatcher:
+        case 'regex-path':
             return <RegexPathMatcherConfig {...configProps} />;
-        case matchers.QueryMatcher:
+        case 'query':
             return <QueryMatcherConfig {...configProps} />;
-        case matchers.ExactQueryMatcher:
+        case 'exact-query-string':
             return <ExactQueryMatcherConfig {...configProps} />;
-        case matchers.HeaderMatcher:
+        case 'header':
             return <HeaderMatcherConfig {...configProps} />;
-        case matchers.RawBodyMatcher:
+        case 'raw-body':
             return <RawBodyExactMatcherConfig {...configProps} />;
-        case matchers.RawBodyIncludesMatcher:
+        case 'raw-body-includes':
             return <RawBodyIncludesMatcherConfig {...configProps} />;
-        case matchers.JsonBodyMatcher:
+        case 'json-body':
             return <JsonBodyExactMatcherConfig {...configProps} />;
-        case matchers.JsonBodyFlexibleMatcher:
+        case 'json-body-matching':
             return <JsonBodyIncludingMatcherConfig {...configProps} />;
         default:
-            return null;
+            throw new UnreachableCheck(matcherKey);
     }
 }
 
@@ -85,6 +101,69 @@ const MatcherConfigContainer = styled.div`
     display: flex;
     flex-direction: column;
 `;
+
+@observer
+class WsMethodMatcherConfig extends MatcherConfig<WebSocketMethodMatcher> {
+
+    private fieldId = _.uniqueId();
+
+    @observable
+    private method: Method = Method.GET;
+
+    componentDidMount() {
+        disposeOnUnmount(this, autorun(() => {
+            const method = this.props.matcher?.method ?? Method.GET;
+            runInAction(() => { this.method = method });
+        }));
+
+        // The matcher is valid by default, so immediately announce that (making the
+        // add button enabled) if this is a new matcher that we're adding:
+        if (!this.props.matcher) {
+            this.props.onChange(new WebSocketMethodMatcher(this.method));
+        }
+    }
+
+    render() {
+        const { method } = this;
+        const { matcherIndex } = this.props;
+
+        const methodName = Method[method];
+
+        // Extract the real numeric enum values from the TS enum:
+        const methodValues = Object.values(Method).filter(n => !isNaN(Number(n))) as Method[];
+
+        return <MatcherConfigContainer title={
+            methodName
+                ? `Matches all ${
+                    methodName
+                } requests`
+                : undefined
+        }>
+            { matcherIndex !== undefined &&
+                <ConfigLabel htmlFor={this.fieldId}>
+                    { matcherIndex !== 0 && 'and ' } with method
+                </ConfigLabel>
+            }
+            <Select
+                id={this.fieldId}
+                value={method}
+                onChange={this.onChange}
+            >
+                { methodValues.map((method) =>
+                    <option value={method} key={method}>
+                        { Method[method] }
+                    </option>
+                )}
+            </Select>
+        </MatcherConfigContainer>;
+    }
+
+    @action.bound
+    onChange(event: React.ChangeEvent<HTMLSelectElement>) {
+        this.method = parseInt(event.currentTarget.value, 10);
+        this.props.onChange(new WebSocketMethodMatcher(this.method));
+    }
+}
 
 @observer
 class HostMatcherConfig extends MatcherConfig<matchers.HostMatcher> {
@@ -142,9 +221,9 @@ class HostMatcherConfig extends MatcherConfig<matchers.HostMatcher> {
         } catch (e) {
             console.log(e);
 
-            this.error = e;
+            this.error = asError(e);
             this.props.onInvalidState();
-            event.target.setCustomValidity(e.message);
+            event.target.setCustomValidity(this.error.message);
         }
         event.target.reportValidity();
     }
@@ -242,9 +321,9 @@ class SimplePathMatcherConfig extends MatcherConfig<matchers.SimplePathMatcher> 
         } catch (e) {
             console.log(e);
 
-            this.error = e;
+            this.error = asError(e);
             this.props.onInvalidState();
-            event.target.setCustomValidity(e.message);
+            event.target.setCustomValidity(this.error.message);
         }
         event.target.reportValidity();
     }
@@ -358,9 +437,9 @@ class RegexPathMatcherConfig extends MatcherConfig<matchers.RegexPathMatcher> {
         } catch (e) {
             console.log(e);
 
-            this.error = e;
+            this.error = asError(e);
             this.props.onInvalidState();
-            event.target.setCustomValidity(e.message);
+            event.target.setCustomValidity(this.error.message);
         }
         event.target.reportValidity();
     }
@@ -480,9 +559,9 @@ class ExactQueryMatcherConfig extends MatcherConfig<matchers.ExactQueryMatcher> 
         } catch (e) {
             console.log(e);
 
-            this.error = e;
+            this.error = asError(e);
             this.props.onInvalidState();
-            event.target.setCustomValidity(e.message);
+            event.target.setCustomValidity(this.error.message);
         }
         event.target.reportValidity();
     }
@@ -633,6 +712,7 @@ class RawBodyMatcherConfig<
             }
             <BodyContainer>
                 <ThemedSelfSizedEditor
+                    contentId={null}
                     value={content}
                     onChange={this.onBodyChange}
                     language='text'
@@ -723,6 +803,7 @@ class JsonMatcherConfig<
             }
             <BodyContainer error={!!error}>
                 <ThemedSelfSizedEditor
+                    contentId={null}
                     value={content}
                     onChange={this.onBodyChange}
                     language='json'
@@ -741,7 +822,7 @@ class JsonMatcherConfig<
             this.error = undefined;
         } catch (e) {
             console.log(e);
-            this.error = e;
+            this.error = asError(e);
             this.props.onInvalidState();
         }
     }

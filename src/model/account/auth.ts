@@ -60,6 +60,10 @@ const auth0Lock = new Auth0LockPasswordless(AUTH0_CLIENT_ID, AUTH0_DOMAIN, {
         params: { scope: 'openid email offline_access app_metadata' },
     },
 
+    // Don't persist logins for easy auto-login later. This makes sense for apps you log into
+    // every day, but it's weird otherwise (e.g. after logout -> one-click login? Very odd).
+    rememberLastLogin: false,
+
     // UI config
     autofocus: true,
     allowAutocomplete: true,
@@ -219,6 +223,7 @@ type AppData = {
     cancel_url?: string;
     last_receipt_url?: string;
     feature_flags?: string[];
+    banned?: boolean;
 }
 
 type SubscriptionData = {
@@ -233,11 +238,12 @@ type SubscriptionData = {
 
 export type User = {
     email?: string;
+    banned: boolean;
     subscription?: SubscriptionData;
     featureFlags: string[];
 };
 
-const anonUser = (): User => ({ featureFlags: [] });
+const anonUser = (): User => ({ featureFlags: [], banned: false });
 
 /*
  * Synchronously gets the last received user data, _without_
@@ -313,7 +319,8 @@ function parseUserData(userJwt: string | null): User {
         subscription: _.every(_.omit(subscription, ...optionalFields))
             ? subscription as SubscriptionData
             : undefined,
-        featureFlags: appData.feature_flags || []
+        featureFlags: appData.feature_flags || [],
+        banned: !!appData.banned
     };
 }
 

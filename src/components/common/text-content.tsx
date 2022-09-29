@@ -40,6 +40,10 @@ export const ContentMonoValue = styled.div`
     line-height: 1.1;
 `;
 
+export const ContentMonoValueInline = styled(ContentMonoValue)`
+    display: inline;
+`;
+
 export const CopyableMonoValue = styled.span`
     font-family: ${p => p.theme.monoFontFamily};
     font-size: 90%;
@@ -48,6 +52,12 @@ export const CopyableMonoValue = styled.span`
 
     word-break: break-all; /* Fallback for anybody without break-word */
     word-break: break-word;
+`;
+
+export const BlankContentPlaceholder = styled.div`
+    opacity: ${p => p.theme.lowlightTextOpacity};
+    font-style: italic;
+    display: inline-block;
 `;
 
 // Takes some HTML (in an __html object) and renders it with nice

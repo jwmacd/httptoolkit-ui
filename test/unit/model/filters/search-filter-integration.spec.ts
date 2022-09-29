@@ -3,6 +3,15 @@ import * as zlib from 'zlib';
 
 import { expect } from '../../../test-setup';
 
+import { delay } from '../../../../src/util/promise';
+import { decodeBody } from '../../../../src/services/ui-worker-api';
+
+import { CollectedEvent } from '../../../../src/types';
+import { FailedTLSConnection } from '../../../../src/model/events/failed-tls-connection';
+import { HttpExchange, SuccessfulExchange } from '../../../../src/model/http/exchange';
+
+import { getExchangeData, getFailedTls } from '../../unit-test-helpers';
+
 import {
     Filter,
     FilterSet,
@@ -16,12 +25,6 @@ import {
 import {
     applySuggestionToText
 } from '../../../../src/model/filters/syntax-matching';
-
-import { getExchangeData, getFailedTls } from '../../unit-test-helpers';
-import { HttpExchange, SuccessfulExchange } from '../../../../src/model/http/exchange';
-import { CollectedEvent, FailedTlsRequest } from '../../../../src/types';
-import { delay } from '../../../../src/util/promise';
-import { decodeBody } from '../../../../src/services/ui-worker-api';
 
 // Given an exact input for a filter, creates the filter and returns it
 function createFilter(input: string): Filter {
@@ -68,10 +71,12 @@ describe("Search filter model integration test:", () => {
                 { index: 0, showAs: "pending" },
                 { index: 0, showAs: "aborted" },
                 { index: 0, showAs: "errored" },
+                { index: 0, showAs: "pinned" },
                 { index: 0, showAs: "category" },
                 { index: 0, showAs: "port" },
                 { index: 0, showAs: "protocol" },
                 { index: 0, showAs: "httpVersion" },
+                { index: 0, showAs: "websocket" },
                 { index: 0, showAs: "not" },
                 { index: 0, showAs: "or" }
             ]);
@@ -95,10 +100,12 @@ describe("Search filter model integration test:", () => {
                 "requests that are still waiting for a response",
                 "requests that aborted before receiving a response",
                 "requests that weren't transmitted successfully",
+                "exchanges that are pinned",
                 "exchanges by their general category",
                 "requests sent to a given port",
-                "exchanges using either HTTP or HTTPS",
+                "exchanges using HTTP, HTTPS, WS or WSS",
                 "exchanges using a given version of HTTP",
+                "websocket streams",
                 "exchanges that do not match a given condition",
                 "exchanges that match any one of multiple conditions"
             ]);
@@ -340,7 +347,7 @@ describe("Search filter model integration test:", () => {
             const matchedEvents = exampleEvents.filter(e => filter.matches(e));
             expect(matchedEvents.length).to.equal(2);
             expect((matchedEvents[0] as SuccessfulExchange).response.statusCode).to.equal(500);
-            expect((matchedEvents[1] as FailedTlsRequest).failureCause).to.equal('cert-rejected');
+            expect((matchedEvents[1] as FailedTLSConnection).failureCause).to.equal('cert-rejected');
         });
     });
 
@@ -943,7 +950,7 @@ describe("Search filter model integration test:", () => {
 
         const decodeBodies = async (events: CollectedEvent[]) => {
             events.forEach(e => {
-                if (e instanceof HttpExchange) {
+                if (e.isHttp()) {
                     e.request.body.decoded;
                     if (e.isSuccessfulExchange()) e.response.body.decoded;
                 }
@@ -988,6 +995,43 @@ describe("Search filter model integration test:", () => {
                 "big-aborted-request",
                 "big-pending-request",
                 "very-big-response"
+            ]);
+        });
+
+        it("should be able to filter for unicode content", async () => {
+            const filter = createFilter("body*=Ж");
+
+            const exampleEvents = [
+                getFailedTls(),
+                getExchangeData({ requestBody: 'an ascii string', responseBody: 'more ascii' }),
+                getExchangeData({ requestBody: 'NOT АЅСІІ', responseBody: 'Ж Cyrillic chars' }),
+                getExchangeData({
+                    responseState: 'aborted',
+                    requestBody: 'big-aborted-request'
+                }),
+                getExchangeData({
+                    responseState: 'pending',
+                    requestBody: 'big-pending-request'
+                }),
+                getExchangeData({ requestBody: '', responseBody: 'very-big-response' })
+            ];
+
+            await decodeBodies(exampleEvents);
+
+            const matchedEvents = exampleEvents.filter(e =>
+                filter.matches(e)
+            ) as HttpExchange[];
+
+            expect(
+                matchedEvents.map((e) =>
+                    e.request.body.encoded.toString('utf8') +
+                    (e.isSuccessfulExchange()
+                        ? e.response.body.encoded.toString('utf8')
+                        : ''
+                    )
+                )
+            ).to.deep.equal([
+                "NOT АЅСІІЖ Cyrillic chars"
             ]);
         });
 
@@ -1113,10 +1157,12 @@ describe("Search filter model integration test:", () => {
                 { index: 3, showAs: "pending" },
                 { index: 3, showAs: "aborted" },
                 { index: 3, showAs: "errored" },
+                { index: 3, showAs: "pinned" },
                 { index: 3, showAs: "category" },
                 { index: 3, showAs: "port" },
                 { index: 3, showAs: "protocol" },
                 { index: 3, showAs: "httpVersion" },
+                { index: 3, showAs: "websocket" }
             ]);
         });
 
@@ -1164,10 +1210,12 @@ describe("Search filter model integration test:", () => {
                 { index: 14, showAs: "pending)" },
                 { index: 14, showAs: "aborted)" },
                 { index: 14, showAs: "errored)" },
+                { index: 14, showAs: "pinned)" },
                 { index: 14, showAs: "category" },
                 { index: 14, showAs: "port" },
                 { index: 14, showAs: "protocol" },
                 { index: 14, showAs: "httpVersion" },
+                { index: 14, showAs: "websocket)" }
             ]);
         });
 
@@ -1177,6 +1225,16 @@ describe("Search filter model integration test:", () => {
             let suggestions = getFilterSuggestions(FilterClasses, input);
             expect(suggestions.map(s => _.pick(s, 'showAs', 'index', 'matchType'))).to.deep.equal([
                 { index: 14, showAs: "errored)", matchType: 'full' }
+            ]);
+        });
+
+        it("should allow skipping the space if the user actively does so", () => {
+            let input = "or(completed,completed";
+
+            let suggestions = getFilterSuggestions(FilterClasses, input);
+            expect(suggestions.map(s => _.pick(s, 'showAs', 'index', 'matchType'))).to.deep.equal([
+                { index: 22, showAs: ")", matchType: 'full' },
+                { index: 22, showAs: ", {another condition})", matchType: 'template' }
             ]);
         });
 
@@ -1205,10 +1263,12 @@ describe("Search filter model integration test:", () => {
                 ["or(error", "requests that weren't transmitted successfully, or ..."],
                 ["or(errored,", "requests that weren't transmitted successfully, or ..."],
                 ["or(errored, ", "requests that weren't transmitted successfully, or ..."],
+                ["or(errored,method", "requests that weren't transmitted successfully, or requests with a given method"],
                 ["or(errored, method", "requests that weren't transmitted successfully, or requests with a given method"],
                 ["or(errored, method=POST", "requests that weren't transmitted successfully, or POST requests"],
                 ["or(errored, method=POST, ", "requests that weren't transmitted successfully, POST requests, or ..."],
                 ["or(errored, method=POST)", "requests that weren't transmitted successfully, or POST requests"],
+                ["or(errored, path=/X)", "requests that weren't transmitted successfully, or requests to /X"],
             ].forEach(([input, expectedOutput]) => {
                 const description = getSuggestionDescriptions(input)[0];
                 expect(description).to.equal(expectedOutput);
@@ -1216,7 +1276,7 @@ describe("Search filter model integration test:", () => {
         });
 
         it("should correctly filter for multiple properties", () => {
-            const filter = createFilter("or(header[my-header], status=404)");
+            const filter = createFilter("or(header[my-header], status=404, path=/a)");
 
             const exampleEvents = [
                 getExchangeData({ responseState: 'aborted' }),
@@ -1233,6 +1293,10 @@ describe("Search filter model integration test:", () => {
                 }),
                 getExchangeData({
                     statusCode: 404
+                }),
+                getExchangeData({
+                    path: '/a',
+                    statusCode: 321
                 }),
                 getFailedTls()
             ];
@@ -1251,7 +1315,8 @@ describe("Search filter model integration test:", () => {
             expect(matchedValues).to.deep.equal([
                 { status: undefined, 'my-header': 'pending-req-with-header' },
                 { status: 200, 'MY-HEADER': 'completed-req-with-header' },
-                { status: 404 }
+                { status: 404 },
+                { status: 321 }
             ]);
         });
     });
@@ -1274,10 +1339,12 @@ describe("Search filter model integration test:", () => {
                 { index: 4, showAs: "pending)" },
                 { index: 4, showAs: "aborted)" },
                 { index: 4, showAs: "errored)" },
+                { index: 4, showAs: "pinned)" },
                 { index: 4, showAs: "category" },
                 { index: 4, showAs: "port" },
                 { index: 4, showAs: "protocol" },
                 { index: 4, showAs: "httpVersion" },
+                { index: 4, showAs: "websocket)" },
             ]);
         });
 

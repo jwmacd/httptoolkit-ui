@@ -1,6 +1,5 @@
 import * as _ from 'lodash';
 import * as React from 'react';
-import { get } from 'typesafe-get';
 import { observer, Observer } from 'mobx-react';
 import { action, computed } from 'mobx';
 
@@ -8,16 +7,25 @@ import AutoSizer from 'react-virtualized-auto-sizer';
 import { FixedSizeList as List, ListChildComponentProps } from 'react-window';
 
 import { styled } from '../../styles'
-import { Icon, WarningIcon } from '../../icons';
-import { CollectedEvent, HttpExchange, FailedTlsRequest } from '../../types';
+import { ArrowIcon, Icon, WarningIcon } from '../../icons';
+import {
+    CollectedEvent,
+    HttpExchange,
+    RTCStream,
+    FailedTLSConnection,
+    RTCConnection
+} from '../../types';
 
 import {
-    getExchangeSummaryColour,
-    ExchangeCategory,
-    describeExchangeCategory
-} from '../../model/http/exchange-colors';
+    getSummaryColour,
+    EventCategory,
+    describeEventCategory
+} from '../../model/events/categorization';
 
+import { UnreachableCheck } from '../../util/error';
+import { getReadableSize } from '../../model/events/bodies';
 import { filterProps } from '../component-utils';
+
 import { EmptyState } from '../common/empty-state';
 import { StatusCode } from '../common/status-code';
 
@@ -103,7 +111,7 @@ const RowPin = styled(
 
 const RowMarker = styled(Column)`
     transition: color 0.2s;
-    color: ${(p: { category: ExchangeCategory }) => getExchangeSummaryColour(p.category)};
+    color: ${(p: { category: EventCategory }) => getSummaryColour(p.category)};
 
     background-color: currentColor;
 
@@ -158,6 +166,51 @@ const PathAndQuery = styled(Column)`
     flex-basis: 1000px;
 `;
 
+// Match Method + Status, but shrink right margin slightly so that
+// spinner + "WebRTC Media" fits OK.
+const EventTypeColumn = styled(Column)`
+    transition: flex-basis 0.1s;
+    ${(p: { pinned?: boolean }) =>
+        p.pinned
+        ? 'flex-basis: 109px;'
+        : 'flex-basis: 130px;'
+    }
+
+    margin-right: 6px !important;
+
+    flex-shrink: 0;
+    flex-grow: 0;
+`;
+
+// Match Host column:
+const RTCEventLabel = styled(Column)`
+    flex-shrink: 1;
+    flex-grow: 0;
+    flex-basis: 500px;
+
+    > svg {
+        padding-right: 0; /* Right, not left - it's rotated */
+    }
+`;
+
+// Match PathAndQuery column:
+const RTCEventDetails = styled(Column)`
+    flex-shrink: 1;
+    flex-grow: 0;
+    flex-basis: 1000px;
+`;
+
+const RTCConnectionDetails = styled(RTCEventDetails)`
+    text-align: center;
+`;
+
+// Host + Path + Query columns:
+const BuiltInApiRequestDetails = styled(Column)`
+    flex-shrink: 1;
+    flex-grow: 0;
+    flex-basis: 1000px;
+`;
+
 const EventListRow = styled.div`
     display: flex;
     flex-direction: row;
@@ -176,7 +229,7 @@ const EventListRow = styled.div`
     }
 `;
 
-const ExchangeListRow = styled(EventListRow)`
+const TrafficEventListRow = styled(EventListRow)`
     background-color: ${props => props.theme.mainBackground};
 
     border-width: 2px 0;
@@ -259,56 +312,99 @@ const EventRow = observer((props: EventRowProps) => {
 
     const isSelected = (selectedEvent === event);
 
-    if ('failureCause' in event) {
+    if (event.isTLSFailure()) {
         return <FailedRequestRow
             index={index}
             isSelected={isSelected}
             style={style}
             failure={event}
         />;
-    } else {
-        return <ExchangeRow
+    } else if (event.isHttp()) {
+        if (event.api?.isBuiltInApi && event.api.matchedOperation()) {
+            return <BuiltInApiRow
+                index={index}
+                isSelected={isSelected}
+                style={style}
+                exchange={event}
+            />
+        } else {
+            return <ExchangeRow
+                index={index}
+                isSelected={isSelected}
+                style={style}
+                exchange={event}
+            />;
+        }
+    } else if (event.isRTCConnection()) {
+        return <RTCConnectionRow
             index={index}
             isSelected={isSelected}
             style={style}
-            exchange={event}
+            event={event}
         />;
-    };
+    } else if (event.isRTCDataChannel() || event.isRTCMediaTrack()) {
+        return <RTCStreamRow
+            index={index}
+            isSelected={isSelected}
+            style={style}
+            event={event}
+        />;
+    } else {
+        throw new UnreachableCheck(event);
+    }
 });
 
 const ExchangeRow = observer(({
     index,
     isSelected,
     style,
-    exchange: { id, category, pinned, isBreakpointed, request, response }
+    exchange
 }: {
     index: number,
     isSelected: boolean,
     style: {},
     exchange: HttpExchange
-}) =>
-    <ExchangeListRow
+}) => {
+    const {
+        request,
+        response,
+        pinned,
+        category
+    } = exchange;
+
+    return <TrafficEventListRow
         role="row"
         aria-label='row'
         aria-rowindex={index + 1}
-        data-event-id={id}
+        data-event-id={exchange.id}
         tabIndex={isSelected ? 0 : -1}
 
         className={isSelected ? 'selected' : ''}
         style={style}
     >
         <RowPin pinned={pinned}/>
-        <RowMarker category={category} title={describeExchangeCategory(category)} />
+        <RowMarker category={category} title={describeEventCategory(category)} />
         <Method pinned={pinned}>{ request.method }</Method>
         <Status>
             {
                 response === 'aborted'
                     ? <StatusCode status={'aborted'} />
-                : isBreakpointed
+                : exchange.isBreakpointed
                     ? <WarningIcon title='Breakpointed, waiting to be resumed' />
+                : exchange.isWebSocket() && response?.statusCode === 101
+                    ? <StatusCode // Special UI for accepted WebSockets
+                        status={exchange.closeState
+                            ? 'WS:closed'
+                            : 'WS:open'
+                        }
+                        message={`${exchange.closeState
+                            ? 'A closed'
+                            : 'An open'
+                        } WebSocket connection`}
+                    />
                 : <StatusCode
-                    status={get(response, 'statusCode')}
-                    message={get(response, 'statusMessage')}
+                    status={response?.statusCode}
+                    message={response?.statusMessage}
                 />
             }
         </Status>
@@ -324,12 +420,180 @@ const ExchangeRow = observer(({
         <PathAndQuery title={ request.parsedUrl.pathname + request.parsedUrl.search }>
             { request.parsedUrl.pathname + request.parsedUrl.search }
         </PathAndQuery>
-    </ExchangeListRow>
-);
+    </TrafficEventListRow>;
+});
+
+const RTCConnectedIcon = styled(Icon).attrs(() => ({
+    icon: ['fas', 'spinner'],
+    spin: true,
+    title: 'Connected'
+}))`
+    margin: 0 5px 0 0;
+`;
+
+const RTCConnectionRow = observer(({
+    index,
+    isSelected,
+    style,
+    event
+}: {
+    index: number,
+    isSelected: boolean,
+    style: {},
+    event: RTCConnection
+}) => {
+    const { category, pinned } = event;
+
+    return <TrafficEventListRow
+        role="row"
+        aria-label='row'
+        aria-rowindex={index + 1}
+        data-event-id={event.id}
+        tabIndex={isSelected ? 0 : -1}
+
+        className={isSelected ? 'selected' : ''}
+        style={style}
+    >
+        <RowPin pinned={pinned}/>
+        <RowMarker category={category} title={describeEventCategory(category)} />
+        <EventTypeColumn>
+            { !event.closeState && <RTCConnectedIcon /> } WebRTC
+        </EventTypeColumn>
+        <Source title={event.source.summary}>
+            <Icon
+                {...event.source.icon}
+                fixedWidth={true}
+            />
+        </Source>
+        <RTCConnectionDetails>
+            {
+                event.clientURL
+            } <ArrowIcon direction='right' /> {
+                event.remoteURL || '?'
+            }
+        </RTCConnectionDetails>
+    </TrafficEventListRow>;
+});
+
+const RTCStreamRow = observer(({
+    index,
+    isSelected,
+    style,
+    event
+}: {
+    index: number,
+    isSelected: boolean,
+    style: {},
+    event: RTCStream
+}) => {
+    const { category, pinned } = event;
+
+    return <TrafficEventListRow
+        role="row"
+        aria-label='row'
+        aria-rowindex={index + 1}
+        data-event-id={event.id}
+        tabIndex={isSelected ? 0 : -1}
+
+        className={isSelected ? 'selected' : ''}
+        style={style}
+    >
+        <RowPin pinned={pinned}/>
+        <RowMarker category={category} title={describeEventCategory(category)} />
+        <EventTypeColumn>
+            { !event.closeState && <RTCConnectedIcon /> } WebRTC {
+                event.isRTCDataChannel()
+                    ? 'Data'
+                : // RTCMediaTrack:
+                    'Media'
+            }
+        </EventTypeColumn>
+        <Source title={event.rtcConnection.source.summary}>
+            <Icon
+                {...event.rtcConnection.source.icon}
+                fixedWidth={true}
+            />
+        </Source>
+        <RTCEventLabel>
+            <ArrowIcon direction='right' /> { event.rtcConnection.remoteURL }
+        </RTCEventLabel>
+        <RTCEventDetails>
+            {
+                event.isRTCDataChannel()
+                    ? <>
+                        { event.label } <em>
+                            ({event.protocol ? `${event.protocol} - ` : ''}
+                            { event.messages.length } message{
+                                event.messages.length !== 1 ? 's' : ''
+                            })
+                        </em>
+                    </>
+                // Media track:
+                    : <>
+                        { event.direction } { event.type } <em>{
+                            getReadableSize(event.totalBytesSent)
+                        } sent, {
+                            getReadableSize(event.totalBytesReceived)
+                        } received</em>
+                    </>
+            }
+        </RTCEventDetails>
+    </TrafficEventListRow>;
+});
+
+const BuiltInApiRow = observer((p: {
+    index: number,
+    exchange: HttpExchange,
+    isSelected: boolean,
+    style: {}
+}) => {
+    const {
+        request,
+        pinned,
+        category
+    } = p.exchange;
+    const api = p.exchange.api!; // Only shown for built-in APIs, so this must be set
+
+    return <TrafficEventListRow
+        role="row"
+        aria-label='row'
+        aria-rowindex={p.index + 1}
+        data-event-id={p.exchange.id}
+        tabIndex={p.isSelected ? 0 : -1}
+
+        className={p.isSelected ? 'selected' : ''}
+        style={p.style}
+    >
+        <RowPin pinned={pinned}/>
+        <RowMarker category={category} title={describeEventCategory(category)} />
+        <EventTypeColumn>
+            { api.service.shortName }: {
+                _.startCase(
+                    api.operation.name
+                    .replace('eth_', '') // One-off hack for Ethereum, but result looks much nicer.
+                )
+            }
+        </EventTypeColumn>
+        <Source title={request.source.summary}>
+            <Icon
+                {...request.source.icon}
+                fixedWidth={true}
+            />
+        </Source>
+        <BuiltInApiRequestDetails>
+            {
+                api.request.parameters
+                .filter(param => param.value !== undefined)
+                .map(param => `${param.name}=${JSON.stringify(param.value)}`)
+                .join(', ')
+            }
+        </BuiltInApiRequestDetails>
+    </TrafficEventListRow>
+});
 
 const FailedRequestRow = observer((p: {
     index: number,
-    failure: FailedTlsRequest,
+    failure: FailedTLSConnection,
     isSelected: boolean,
     style: {}
 }) =>

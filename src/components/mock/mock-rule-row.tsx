@@ -4,19 +4,39 @@ import * as polished from 'polished';
 import { observer, inject, disposeOnUnmount, Observer } from 'mobx-react';
 import { action, observable, reaction } from 'mobx';
 import { Method, matchers } from 'mockttp';
-import { Draggable, DraggingStyle, NotDraggingStyle, DraggableStateSnapshot } from 'react-beautiful-dnd';
+import {
+    Draggable,
+    DraggingStyle,
+    NotDraggingStyle,
+    DraggableStateSnapshot
+} from 'react-beautiful-dnd';
 
 import { styled, css } from '../../styles';
 import { Icon } from '../../icons';
 
-import { getMethodColor } from '../../model/http/exchange-colors';
-import { Matcher, Handler, isPaidHandler } from '../../model/rules/rules';
-import { HtkMockRule, ItemPath } from '../../model/rules/rules-structure';
+import { getMethodColor, getSummaryColour } from '../../model/events/categorization';
+import {
+    HtkMockRule,
+    Matcher,
+    Handler,
+    isPaidHandler,
+    InitialMatcher,
+    getRuleTypeFromInitialMatcher,
+    isCompatibleMatcher,
+    isCompatibleHandler,
+    getAvailableAdditionalMatchers,
+    getAvailableHandlers,
+    RuleType
+} from '../../model/rules/rules';
+import { ItemPath } from '../../model/rules/rules-structure';
 import {
     summarizeMatcher,
     summarizeHandler
 } from '../../model/rules/rule-descriptions';
 import { AccountStore } from '../../model/account/account-store';
+import {
+    serverVersion as serverVersionObservable
+} from '../../services/service-versions';
 
 import { clickOnEnter, noPropagation } from '../component-utils';
 import { GetProOverlay } from '../account/pro-placeholders';
@@ -259,6 +279,8 @@ export class RuleRow extends React.Component<{
     resetRule: (path: ItemPath) => void;
     deleteRule: (path: ItemPath) => void;
     cloneRule: (path: ItemPath) => void;
+
+    getRuleDefaultHandler: (type: RuleType) => Handler;
 }> {
 
     initialMatcherSelect = React.createRef<HTMLSelectElement>();
@@ -290,16 +312,28 @@ export class RuleRow extends React.Component<{
             getPro
         } = this.props.accountStore!;
 
+        const ruleType = rule.type;
         const initialMatcher = rule.matchers.length ? rule.matchers[0] : undefined;
 
-        let method: string | undefined;
-        if (initialMatcher instanceof matchers.MethodMatcher) {
-            method = Method[initialMatcher.method];
-        } else if (initialMatcher !== undefined) {
-            method = 'unknown';
+        let ruleColour: string;
+        if (ruleType === 'http') {
+            if (initialMatcher instanceof matchers.MethodMatcher) {
+                ruleColour = getMethodColor(Method[initialMatcher.method]);
+            } else if (initialMatcher !== undefined) {
+                ruleColour = getMethodColor('unknown');
+            } else {
+                ruleColour = 'transparent';
+            }
         } else {
-            method = undefined;
+            ruleColour = getSummaryColour(ruleType);
         }
+
+        const serverVersion = serverVersionObservable.state === 'fulfilled'
+            ? serverVersionObservable.value as string
+            : undefined;
+
+        const availableMatchers = getAvailableAdditionalMatchers(ruleType, serverVersion);
+        const availableHandlers = getAvailableHandlers(ruleType, serverVersion);
 
         // Handlers are in demo mode (uneditable, behind a 'Get Pro' overlay), either if the rule
         // has a handler you can't use, or you've picked a Pro handler and its been put in demoHandler
@@ -316,10 +350,7 @@ export class RuleRow extends React.Component<{
         >{ (provided, snapshot) => <Observer>{ () =>
             <RowContainer
                 {...provided.draggableProps}
-                borderColor={method
-                    ? getMethodColor(method)
-                    : 'transparent'
-                }
+                borderColor={ruleColour}
                 ref={(ref: HTMLElement | null) => {
                     provided.innerRef(ref);
                     this.containerRef = ref;
@@ -360,7 +391,7 @@ export class RuleRow extends React.Component<{
                                 <InitialMatcherRow
                                     ref={this.initialMatcherSelect}
                                     matcher={initialMatcher}
-                                    onChange={(...ms) => this.updateMatcher(0, ...ms)}
+                                    onChange={this.setInitialMatcher}
                                 />
 
                                 { rule.matchers.slice(1).map((matcher, i) =>
@@ -375,6 +406,7 @@ export class RuleRow extends React.Component<{
 
                                 { rule.matchers.length > 0 &&
                                     <NewMatcherRow
+                                        availableMatchers={availableMatchers}
                                         existingMatchers={rule.matchers}
                                         onAdd={this.addMatcher}
                                     />
@@ -397,6 +429,7 @@ export class RuleRow extends React.Component<{
                             <HandlerSelector
                                 value={ruleHandler}
                                 onChange={this.updateHandler}
+                                availableHandlers={availableHandlers}
                             />
 
                             { isHandlerDemo
@@ -404,11 +437,13 @@ export class RuleRow extends React.Component<{
                                 // show a handler demo with a 'Get Pro' overlay:
                                 ? <GetProOverlay getPro={getPro} source={`rule-${ruleHandler.type}`}>
                                     <HandlerConfiguration
+                                        ruleType={ruleType}
                                         handler={ruleHandler}
                                         onChange={_.noop}
                                     />
                                 </GetProOverlay>
                                 : <HandlerConfiguration
+                                    ruleType={ruleType}
                                     handler={ruleHandler}
                                     onChange={this.updateHandler}
                                 />
@@ -450,13 +485,42 @@ export class RuleRow extends React.Component<{
     });
 
     @action.bound
+    setInitialMatcher(matcher: InitialMatcher) {
+        const currentRuleType = this.props.rule.type;
+        const newRuleType = getRuleTypeFromInitialMatcher(matcher);
+
+        if (currentRuleType === newRuleType) {
+            this.props.rule.matchers[0] = matcher;
+        } else {
+            this.props.rule.type = newRuleType;
+
+            this.props.rule.matchers = [
+                matcher,
+                // Drop any incompatible matchers:
+                ...this.props.rule.matchers
+                    .slice(1)
+                    .filter(m => isCompatibleMatcher(m, newRuleType))
+            ];
+
+            // Reset the rule handler, if incompatible:
+            this.props.rule.handler = isCompatibleHandler(this.props.rule.handler, newRuleType)
+                ? this.props.rule.handler
+                : this.props.getRuleDefaultHandler(newRuleType);
+        }
+    }
+
+    @action.bound
     addMatcher(matcher: Matcher) {
-        this.props.rule.matchers.push(matcher);
+        this.props.rule.matchers.push(
+            matcher as any // Matcher must be valid, as availableMatchers is type-based
+        );
     }
 
     @action.bound
     updateMatcher(index: number, ...matchers: Matcher[]) {
-        this.props.rule.matchers.splice(index, 1, ...matchers);
+        this.props.rule.matchers.splice(index, 1,
+            ...matchers as any[] // Matchers must be valid, as availableMatchers is type-based
+        );
     }
 
     @action.bound
