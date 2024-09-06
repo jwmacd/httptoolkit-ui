@@ -1,21 +1,25 @@
 import React from "react";
 import { inject, observer } from "mobx-react";
 
-import { styled } from "../../styles";
+import { styled, popColor } from "../../styles";
 import { Icon } from "../../icons";
 
-import { UiStore } from "../../model/ui-store";
+import { UiStore } from "../../model/ui/ui-store";
 
 import { Pill } from "../common/pill";
 import { UnstyledButton } from "../common/inputs";
 import { AccountStore } from "../../model/account/account-store";
 
-export const ProPill = styled(inject('uiStore')((p: { uiStore?: UiStore, className?: string }) =>
-    <Pill className={p.className} color={p.uiStore!.theme.popColor}>PRO</Pill>
+export const ProPill = styled(inject('uiStore')((p: {
+    uiStore?: UiStore,
+    className?: string,
+    children?: string
+}) =>
+    <Pill className={p.className} color={p.uiStore!.theme.popColor}>{ p.children || 'PRO' }</Pill>
 ))`
     font-size: ${p => p.theme.textSize};
 
-    color: #e1421f;
+    color: ${popColor};
     background-color: rgba(225,66,31,0.2);
 `;
 
@@ -41,7 +45,7 @@ const GetProButton = styled(UnstyledButton)`
     color: ${p => p.theme.primaryInputColor};
     background-color: ${p => p.theme.primaryInputBackground};
     border-radius: 4px;
-    box-shadow: 0 2px 10px 0 rgba(0,0,0,0.3);
+    box-shadow: 0 2px 10px 0 rgba(0,0,0,${p => p.theme.boxShadowAlpha/2});
 
     > svg {
         margin-bottom: 5px;

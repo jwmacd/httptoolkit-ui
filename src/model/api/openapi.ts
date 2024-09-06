@@ -10,7 +10,8 @@ import type {
     RequestBodyObject,
     SchemaObject
 } from 'openapi-directory';
-import * as Ajv from 'ajv';
+import Ajv from 'ajv';
+import addFormats from 'ajv-formats';
 
 import {
     HttpExchange,
@@ -19,7 +20,8 @@ import {
     HtkResponse,
     Html
 } from "../../types";
-import { firstMatch, empty, lastHeader } from '../../util';
+import { firstMatch, empty } from '../../util';
+import { lastHeader } from '../../util/headers';
 import { formatAjvError } from '../../util/json-schema';
 
 import {
@@ -31,12 +33,21 @@ import {
     ApiParameter
 } from './api-interfaces';
 import { OpenApiMetadata } from './build-api-metadata';
-import { fromMarkdown } from '../markdown';
+import { fromMarkdown } from '../ui/markdown';
 
 const paramValidator = new Ajv({
     coerceTypes: 'array',
-    unknownFormats: 'ignore' // OpenAPI uses some non-standard formats
+    strict: false,
+    strictSchema: false,
+    formats: new Proxy({}, {
+        // Return 'true' (ignore) for all undefined formats:
+        get(target: any, name: string) {
+            if (name in target) return target[name];
+            else return true;
+        }
+    })
 });
+addFormats(paramValidator);
 
 function getPath(api: OpenApiMetadata, request: HtkRequest): {
     pathSpec: PathObject,
@@ -92,7 +103,7 @@ export function getParameters(
                 specParam: param,
                 name: param.name,
                 in: param.in,
-                description: fromMarkdown(param.description),
+                description: fromMarkdown(param.description, { linkify: true }),
                 required: param.required || param.in === 'path',
                 type: schema && schema.type,
                 defaultValue: schema && schema.default,
@@ -202,7 +213,7 @@ export function getParameters(
                 if (!validated && paramValidator.errors) {
                     param.warnings.push(
                         ...paramValidator.errors.map(e =>
-                            formatAjvError(valueWrapper, e, (path) => path.replace(/^\.value/, param.name))
+                            formatAjvError(valueWrapper, e, (path) => path.replace(/^\/value/, param.name))
                         )
                     );
                 }
@@ -236,8 +247,8 @@ export function getBodySchema(
 
     const schemaKey = _.find<string>(mediaTypeKeys, (key) =>
         new RegExp('^' + // Must match at the start
-            key.replace('*', '.*') // Wildcards to regex wildcard
-                .replace(/;.*/, '') // Ignore charset etc
+            key.replace(/\*/g, '.*') // Wildcards to regex wildcard
+                .replace(/;.*/g, '') // Ignore charset etc
         ).exec(contentType) !== null
     );
 
@@ -322,7 +333,7 @@ class OpenApiService implements ApiService {
             ?? this.name.split(' ')[0];
 
         this.logoUrl = service['x-logo']?.url;
-        this.description = fromMarkdown(service.description);
+        this.description = fromMarkdown(service.description, { linkify: true });
         this.docsUrl = spec?.externalDocs?.url;
     }
 
@@ -372,14 +383,15 @@ class OpenApiOperation implements ApiOperation {
                     () => (get(op.spec, 'description', 'length') || Infinity) < 40, op.spec.description!
                 ],
                 op.pathSpec.summary
-            ) || `${op.method.toUpperCase()} ${op.path}`
+            ) || `${op.method.toUpperCase()} ${op.path}`,
+            { linkify: true }
         ).__html);
 
         this.description = fromMarkdown(firstMatch<string>(
             [() => get(op.spec, 'description') !== this.name, get(op.spec, 'description')],
             [() => get(op.spec, 'summary') !== this.name, get(op.spec, 'summary')],
             op.pathSpec.description
-        ));
+        ), { linkify: true });
 
         if (!op.matched) this.warnings.push(
             `Unknown operation '${this.name}'.`
@@ -438,7 +450,7 @@ class OpenApiResponse implements ApiResponse {
             : undefined;
 
         this.description = bodySpec && bodySpec.description !== response.statusMessage
-            ? fromMarkdown(bodySpec.description)
+            ? fromMarkdown(bodySpec.description, { linkify: true })
             : undefined;
         this.bodySchema = getBodySchema(spec, bodySpec, response);
     }

@@ -1,48 +1,29 @@
 import * as _ from 'lodash';
 import * as React from 'react';
-import { observer, disposeOnUnmount } from 'mobx-react';
-import { observable, action, autorun, reaction } from 'mobx';
-import { withTheme } from 'styled-components';
+import { observer, disposeOnUnmount, inject } from 'mobx-react';
+import { observable, action, autorun, reaction, comparer } from 'mobx';
 import type { SchemaObject } from 'openapi-directory';
 
-import type * as monacoTypes from 'monaco-editor';
-import type { default as _MonacoEditor, MonacoEditorProps } from 'react-monaco-editor';
-
-import { reportError } from '../../errors';
-import { delay } from '../../util/promise';
-import { asError } from '../../util/error';
+import { logError } from '../../errors';
 import { Omit } from '../../types';
-import { styled, Theme, defineMonacoThemes } from '../../styles';
+import { styled } from '../../styles';
+
+import { UiStore } from '../../model/ui/ui-store';
+import {
+    MonacoTypes,
+    MonacoEditorProps,
+    MonacoEditor,
+    monacoLoadingPromise,
+    modelsMarkers,
+    reloadMonacoEditor
+} from './monaco';
+
 import { FocusWrapper } from './focus-wrapper';
+import { buildContextMenuCallback } from './editor-context-menu';
 
-let MonacoEditor: typeof _MonacoEditor | undefined;
-// Defer loading react-monaco-editor ever so slightly. This has two benefits:
-// * don't delay first app start waiting for this massive chunk to load
-// * better caching (app/monaco-editor bundles can update independently)
-let rmeModulePromise = delay(100).then(() => loadMonacoEditor());
-
-async function loadMonacoEditor(retries = 5): Promise<void> {
-    try {
-        // These might look like two sequential requests, but since they're a single chunk,
-        // it's actually just one load and then both will fire together.
-        const rmeModule = await import(/* webpackChunkName: "react-monaco-editor" */ 'react-monaco-editor');
-        const monacoEditorModule = await import(/* webpackChunkName: "react-monaco-editor" */ 'monaco-editor/esm/vs/editor/editor.api');
-
-        defineMonacoThemes(monacoEditorModule);
-        MonacoEditor = rmeModule.default;
-    } catch (err) {
-        console.log('Monaco load failed', asError(err).message);
-        if (retries <= 0) {
-            console.warn('Repeatedly failed to load monaco editor, giving up');
-            throw err;
-        }
-
-        return loadMonacoEditor(retries - 1);
-    }
-}
 
 export interface EditorProps extends MonacoEditorProps {
-    onContentSizeChange?: (contentUpdate: monacoTypes.editor.IContentSizeChangedEvent) => void;
+    onContentSizeChange?: (contentUpdate: MonacoTypes.editor.IContentSizeChangedEvent) => void;
 
     // When this prop changes, the editor layout will be reset. This can be used to indicate a change of the content
     // represented by the editor (which should update state, e.g. the editor content selection) even when editors
@@ -78,10 +59,12 @@ const EditorMaxHeightContainer = styled.div`
     }
 `;
 
+@inject('uiStore')
 @observer
-export class SelfSizedBaseEditor extends React.Component<
+export class SelfSizedEditor extends React.Component<
     Omit<EditorProps, 'onContentSizeChange'> & {
-        expanded?: boolean
+        expanded?: boolean,
+        uiStore?: UiStore // Injected automatically
     }
 > {
 
@@ -89,7 +72,7 @@ export class SelfSizedBaseEditor extends React.Component<
     editor = React.createRef<BaseEditor>();
 
     @action.bound
-    onContentSizeChange(contentUpdate: monacoTypes.editor.IContentSizeChangedEvent) {
+    onContentSizeChange(contentUpdate: MonacoTypes.editor.IContentSizeChangedEvent) {
         this.contentHeight = Math.min(contentUpdate.contentHeight, MAX_HEIGHT);
     }
 
@@ -122,8 +105,14 @@ export class SelfSizedBaseEditor extends React.Component<
             ref={this.container}
             expanded={!!this.props.expanded}
             style={{ 'height': this.contentHeight + 'px' }}
+            onContextMenu={buildContextMenuCallback(
+                this.props.uiStore!,
+                !!this.props.options?.readOnly,
+                this.editor
+            )}
         >
             <BaseEditor
+                theme={this.props.uiStore!.theme.monacoTheme}
                 {...this.props}
                 ref={this.editor}
                 onContentSizeChange={this.onContentSizeChange}
@@ -132,17 +121,75 @@ export class SelfSizedBaseEditor extends React.Component<
     }
 }
 
-export const ThemedSelfSizedEditor = withTheme(
-    React.forwardRef(
-        (
-            { theme, ...otherProps }: {
-                theme?: Theme,
-                expanded?: boolean
-            } & Omit<EditorProps, 'onContentSizeChange' | 'theme'>,
-            ref: React.Ref<SelfSizedBaseEditor>
-        ) => <SelfSizedBaseEditor theme={theme!.monacoTheme} ref={ref} {...otherProps} />
-    )
-);
+// As opposed to self-sized - when not expanded, the container-sized
+const ContainerSizedEditorContainer = styled.div`
+    ${(p: { expanded: boolean }) => p.expanded
+        ? `
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            height: auto !important;
+        `
+        : `
+            height: 100%;
+        `
+    }
+`;
+
+@inject('uiStore')
+@observer
+export class ContainerSizedEditor extends React.Component<
+    Omit<EditorProps, 'onContentSizeChange'> & {
+        expanded?: boolean,
+        uiStore?: UiStore // Injected automatically
+    }
+> {
+
+    container = React.createRef<HTMLDivElement>();
+    editor = React.createRef<BaseEditor>();
+
+    onResize = _.throttle(() => {
+        if (this.editor.current) this.editor.current.relayout();
+    }, 25, { leading: true, trailing: true });
+
+    componentDidUpdate() {
+        // Relayout after update, to ensure the editor is always using the full available
+        // size even as the editor content changes
+        if (this.editor.current) this.editor.current.relayout();
+    }
+
+    resizeObserver = new ResizeObserver(this.onResize);
+
+    componentDidMount() {
+        if (this.container.current) {
+            this.resizeObserver.observe(this.container.current);
+        }
+    }
+
+    componentWillUnmount() {
+        this.resizeObserver.disconnect();
+    }
+
+    render() {
+        return <ContainerSizedEditorContainer
+            ref={this.container}
+            expanded={!!this.props.expanded}
+            onContextMenu={buildContextMenuCallback(
+                this.props.uiStore!,
+                !!this.props.options?.readOnly,
+                this.editor
+            )}
+        >
+            <BaseEditor
+                theme={this.props.uiStore!.theme.monacoTheme}
+                {...this.props}
+                ref={this.editor}
+            />
+        </ContainerSizedEditorContainer>
+    }
+}
 
 const EditorFocusWrapper = styled(FocusWrapper)`
     height: 100%;
@@ -150,30 +197,27 @@ const EditorFocusWrapper = styled(FocusWrapper)`
 `;
 
 @observer
-export class BaseEditor extends React.Component<EditorProps> {
+class BaseEditor extends React.Component<EditorProps> {
 
     // Both provided async, once the editor has initialized
-    editor: monacoTypes.editor.IStandaloneCodeEditor | undefined;
-    monaco: (typeof monacoTypes) | undefined;
+    editor: MonacoTypes.editor.IStandaloneCodeEditor | undefined;
+    monaco: (typeof MonacoTypes) | undefined;
 
     @observable
     monacoEditorLoaded = !!MonacoEditor;
 
     @observable
-    modelUri: string | null = null;
+    modelUri: MonacoTypes.Uri | undefined = undefined;
 
-    registeredSchemaUri: string | null = null;
+    registeredSchemaUri: string | undefined = undefined;
 
     constructor(props: EditorProps) {
         super(props);
 
         if (!this.monacoEditorLoaded) {
-            rmeModulePromise
+            monacoLoadingPromise
                 // Did it fail before? Retry it now, just in case
-                .catch(() => {
-                    rmeModulePromise = loadMonacoEditor(0);
-                    return rmeModulePromise;
-                })
+                .catch(() => reloadMonacoEditor())
                 .then(action(() => this.monacoEditorLoaded = true));
         }
 
@@ -195,38 +239,74 @@ export class BaseEditor extends React.Component<EditorProps> {
         }
     }
 
+    private getMarkerController() {
+        return this.editor?.getContribution('editor.contrib.markerController') as unknown as {
+            showAtMarker(marker: MonacoTypes.editor.IMarker): void;
+            close(focus: boolean): void;
+        };
+    }
+
+    private withoutFocusingEditor(cb: () => void) {
+        if (!this.editor) return;
+        const originalFocusMethod = this.editor.focus;
+        this.editor.focus = () => {};
+        cb();
+        this.editor.focus = originalFocusMethod;
+    }
+
     private async resetUIState() {
         if (this.editor && this.monaco) {
             this.editor.setSelection(
                 new this.monaco.Selection(0, 0, 0, 0)
             );
-            requestAnimationFrame(() => {
-                // Sometimes, if the value updates immediately, the above results in us
-                // selecting *all* content. We reset again after a frame to avoid that.
-                if (this.editor && this.monaco) {
-                    this.editor.setSelection(new this.monaco.Selection(0, 0, 0, 0));
-                }
-            });
 
             this.relayout();
+
+            requestAnimationFrame(() => {
+                if (this.editor && this.monaco) {
+                    // Sometimes, if the value updates immediately, the above results in us
+                    // selecting *all* content. We reset again after a frame to avoid that.
+                    this.editor.setSelection(new this.monaco.Selection(0, 0, 0, 0));
+                }
+
+                // Clear open problems - without this, expanded markers (squiggly line -> View Problem)
+                // will persist even though the marker itself no longer exists in the content.
+                this.getMarkerController()?.close(false);
+            });
         }
     }
 
     @action.bound
-    onEditorDidMount(editor: monacoTypes.editor.IStandaloneCodeEditor, monaco: typeof monacoTypes) {
+    onEditorDidMount(editor: MonacoTypes.editor.IStandaloneCodeEditor, monaco: typeof MonacoTypes) {
         this.editor = editor;
         this.monaco = monaco;
 
         const model = editor.getModel();
-        this.modelUri = model && model.uri.toString();
+        this.modelUri = model?.uri;
 
-        this.editor.onDidChangeModel(action((e: monacoTypes.editor.IModelChangedEvent) => {
-            this.modelUri = e.newModelUrl && e.newModelUrl.toString()
+        this.editor.onDidChangeModel(action((e: MonacoTypes.editor.IModelChangedEvent) => {
+            this.modelUri = e.newModelUrl ?? undefined;
         }));
 
         if (this.props.onContentSizeChange) {
             this.editor.onDidContentSizeChange(this.props.onContentSizeChange);
         }
+
+        // For read-only editors, we want to manually highlight the inline errors, if there are
+        // any. Mostly relevant to OpenAPI body validation issues. We can't do this in reset or
+        // elsewhere, as markers update slightly asynchronously from content changes, so this is
+        // only visible by observing modelMarkers.
+        disposeOnUnmount(this, reaction(() => ({
+            markers: (this.modelUri && modelsMarkers.get(this.modelUri)) ?? []
+        }), ({ markers }) => {
+            if (markers.length && this.props.options?.readOnly) {
+                requestAnimationFrame(() => { // Run after the reset marker.close() update
+                    this.withoutFocusingEditor(() => {
+                        this.getMarkerController().showAtMarker(markers[0]);
+                    });
+                });
+            }
+        }, { equals: comparer.structural }));
     }
 
     componentDidMount() {
@@ -240,18 +320,20 @@ export class BaseEditor extends React.Component<EditorProps> {
             const existingOptions = this.monaco.languages.json.jsonDefaults.diagnosticsOptions;
             let newSchemaMappings: SchemaMapping[] = existingOptions.schemas || [];
 
-            if (this.modelUri) {
+            const uriString = this.modelUri?.toString();
+
+            if (uriString) {
                 const newSchema = this.props.schema;
 
                 const existingMapping = _.find(existingOptions.schemas || [],
-                    (sm: SchemaMapping) => sm.uri === this.modelUri
+                    (sm: SchemaMapping) => sm.uri === uriString
                 ) as SchemaMapping | undefined;
 
                 if (newSchema && (!existingMapping || existingMapping.schema !== newSchema)) {
                     // If we have a replacement/new schema for this file, replace/add it.
                     newSchemaMappings = newSchemaMappings
                         .filter((sm) => sm !== existingMapping)
-                        .concat({ uri: this.modelUri, fileMatch: [this.modelUri], schema: newSchema });
+                        .concat({ uri: uriString, fileMatch: [uriString], schema: newSchema });
                 } else if (!newSchema) {
                     // If we have no schema for this file, drop the schema
                     newSchemaMappings = newSchemaMappings
@@ -259,7 +341,7 @@ export class BaseEditor extends React.Component<EditorProps> {
                 }
             }
 
-            if (this.registeredSchemaUri && this.modelUri != this.registeredSchemaUri) {
+            if (this.registeredSchemaUri && uriString != this.registeredSchemaUri) {
                 // If we registered a previous schema for a different model, clear it up.
                 newSchemaMappings = newSchemaMappings
                     .filter((sm) => sm.uri !== this.registeredSchemaUri);
@@ -275,7 +357,7 @@ export class BaseEditor extends React.Component<EditorProps> {
                 this.monaco.languages.json.jsonDefaults.setDiagnosticsOptions(options);
             }
 
-            this.registeredSchemaUri = this.modelUri;
+            this.registeredSchemaUri = uriString;
         }));
     }
 
@@ -295,17 +377,17 @@ export class BaseEditor extends React.Component<EditorProps> {
                 this.monaco.languages.json.jsonDefaults.setDiagnosticsOptions(newOptions);
             }
 
-            this.registeredSchemaUri = null;
+            this.registeredSchemaUri = undefined;
         }
     }
 
     render() {
         if (!this.monacoEditorLoaded || !MonacoEditor) {
-            reportError('Monaco editor failed to load');
+            logError('Monaco editor failed to load');
             return null;
         }
 
-        const options: monacoTypes.editor.IEditorConstructionOptions = {
+        const options: MonacoTypes.editor.IEditorConstructionOptions = {
             showFoldingControls: 'always',
 
             scrollbar: {
@@ -314,7 +396,7 @@ export class BaseEditor extends React.Component<EditorProps> {
 
             quickSuggestions: false,
             parameterHints: { enabled: false },
-            codeLens: false,
+            codeLens: true,
             minimap: { enabled: false },
             contextmenu: false,
             scrollBeyondLastLine: false,

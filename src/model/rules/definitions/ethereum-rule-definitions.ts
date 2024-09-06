@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.tech>
+ * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.com>
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -271,7 +271,7 @@ export type EthereumInitialMatcher = InstanceType<typeof EthereumInitialMatcherC
 type EthereumHandlerClass = typeof EthereumHandlerLookup[keyof typeof EthereumHandlerLookup];
 type EthereumHandler = InstanceType<EthereumHandlerClass>;
 
-export interface EthereumMockRule extends Omit<RequestRuleData, 'matchers'> {
+export interface EthereumRule extends Omit<RequestRuleData, 'matchers'> {
     id: string;
     type: 'ethereum';
     activated: boolean;

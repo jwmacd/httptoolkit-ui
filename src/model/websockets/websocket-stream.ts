@@ -6,7 +6,8 @@ import {
     InputRequest,
     InputResponse,
     InputWebSocketMessage,
-    InputWebSocketClose
+    InputWebSocketClose,
+    InputFailedRequest
 } from '../../types';
 
 import { ApiStore } from '../api/api-store';
@@ -38,6 +39,7 @@ export class WebSocketStream extends HttpExchange {
         if (_.isString(subprotocolHeader)) this.subprotocol = subprotocolHeader;
 
         this.accepted = true;
+        Object.assign(this.timingEvents, response.timingEvents);
     }
 
     wasAccepted() {
@@ -53,7 +55,9 @@ export class WebSocketStream extends HttpExchange {
 
     @action
     addMessage(message: InputWebSocketMessage) {
-        this.messages.push(new StreamMessage(message, this.messages.length));
+        this.messages.push(
+            new StreamMessage(message, this.messages.length, this.selectedSubprotocol)
+        );
     }
 
     @observable
@@ -62,13 +66,14 @@ export class WebSocketStream extends HttpExchange {
     @action
     markClosed(closeData: InputWebSocketClose) {
         this.closeData = closeData;
+        Object.assign(this.timingEvents, closeData.timingEvents);
     }
 
     get closeState() {
         return this.closeData;
     }
 
-    markAborted(request: Pick<InputInitiatedRequest, 'timingEvents' | 'tags'>) {
+    markAborted(request: InputFailedRequest) {
         if (!this.wasAccepted()) {
             // An abort before accept acts exactly as in normal HTTP
             return super.markAborted(request);

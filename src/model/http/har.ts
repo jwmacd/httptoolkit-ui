@@ -4,22 +4,29 @@ import * as HarFormat from 'har-format';
 import * as HarValidator from 'har-validator';
 import * as querystring from 'querystring';
 
-import { lastHeader } from '../../util';
-import { ObservablePromise } from '../../util/observable';
 import {
     Headers,
+    Trailers,
     HtkRequest,
     HarRequest,
     HarResponse,
     HttpExchange,
     CollectedEvent,
     TimingEvents,
-    InputTLSRequest,
-    FailedTLSConnection
+    FailedTlsConnection,
+    InputWebSocketMessage,
+    TlsSocketMetadata
 } from '../../types';
+
+import { stringToBuffer } from '../../util/buffer';
+import { lastHeader } from '../../util/headers';
+import { ObservablePromise } from '../../util/observable';
+import { unreachableCheck } from '../../util/error';
 
 import { UI_VERSION } from '../../services/service-versions';
 import { getStatusMessage } from './http-docs';
+import { StreamMessage } from '../events/stream-message';
+import { QueuedEvent } from '../events/events-store';
 
 // We only include request/response bodies that are under 500KB
 const HAR_BODY_SIZE_LIMIT = 50000000;
@@ -27,6 +34,10 @@ const UTF8Decoder = new TextDecoder('utf8', { fatal: true });
 
 export interface Har extends HarFormat.Har {
     log: HarLog;
+}
+
+export interface HarGenerationOptions {
+    bodySizeLimit: number;
 }
 
 interface HarLog extends HarFormat.Log {
@@ -50,31 +61,55 @@ export interface ExtendedHarRequest extends HarFormat.Request {
         | 'discarded:not-representable'
         | 'discarded:not-decodable';
     _content?: RequestContentData;
+    _trailers?: HarFormat.Header[];
+}
+
+export interface ExtendedHarResponse extends HarFormat.Response {
+    _trailers?: HarFormat.Header[];
 }
 
 export interface HarEntry extends HarFormat.Entry {
+    _resourceType?: 'websocket';
+    _webSocketMessages?: HarWebSocketMessage[];
+    _webSocketClose?: {
+        code?: number;
+        reason?: string;
+        timestamp?: number;
+    } | 'aborted'
     _pinned?: true;
+}
+
+export interface HarWebSocketMessage {
+    type: 'send' | 'receive';
+    opcode: 1 | 2;
+    data: string;
+    time: number; // Epoch timestamp, as a float in seconds
 }
 
 export type HarTlsErrorEntry = {
     startedDateTime: string;
     time: number; // Floating-point high-resolution duration, in ms
     hostname?: string; // Undefined if connection fails before hostname received
-    cause: FailedTLSConnection['failureCause'];
+    cause: FailedTlsConnection['failureCause'];
+
+    tlsMetadata?: TlsSocketMetadata;
 
     clientIPAddress: string;
     clientPort: number;
 }
 
-export async function generateHar(events: CollectedEvent[]): Promise<Har> {
+export async function generateHar(
+    events: CollectedEvent[],
+    options: HarGenerationOptions = { bodySizeLimit: HAR_BODY_SIZE_LIMIT }
+): Promise<Har> {
     const [exchanges, otherEvents] = _.partition(events, e => e.isHttp()) as [
         HttpExchange[], CollectedEvent[]
     ];
 
-    const errors = otherEvents.filter(e => e.isTLSFailure()) as FailedTLSConnection[];
+    const errors = otherEvents.filter(e => e.isTlsFailure()) as FailedTlsConnection[];
 
     const sourcePages = getSourcesAsHarPages(exchanges);
-    const entries = await Promise.all(exchanges.map(generateHarEntry));
+    const entries = await Promise.all(exchanges.map(e => generateHarHttpEntry(e, options)));
     const errorEntries = errors.map(generateHarTlsError);
 
     return {
@@ -91,7 +126,7 @@ export async function generateHar(events: CollectedEvent[]): Promise<Har> {
     };
 }
 
-function asHarHeaders(headers: Headers) {
+function asHarHeaders(headers: Headers | Trailers) {
     return _.map(headers, (headerValue, headerKey) => ({
         name: headerKey,
         value: _.isArray(headerValue)
@@ -110,21 +145,26 @@ function asHtkHeaders(headers: HarFormat.Header[]) {
 
 export function generateHarRequest(
     request: HtkRequest,
-    waitForDecoding?: false
+    waitForDecoding: false,
+    options: HarGenerationOptions
 ): ExtendedHarRequest;
 export function generateHarRequest(
     request: HtkRequest,
-    waitForDecoding: true
+    waitForDecoding: true,
+    options: HarGenerationOptions
 ): ExtendedHarRequest | ObservablePromise<ExtendedHarRequest>;
 export function generateHarRequest(
     request: HtkRequest,
-    waitForDecoding = false
+    waitForDecoding: boolean,
+    options: HarGenerationOptions
 ): ExtendedHarRequest | ObservablePromise<ExtendedHarRequest> {
     if (waitForDecoding && (
         !request.body.decodedPromise.state ||
         request.body.decodedPromise.state === 'pending'
     )) {
-        return request.body.decodedPromise.then(() => generateHarRequest(request));
+        return request.body.decodedPromise.then(() =>
+            generateHarRequest(request, false, options)
+        );
     }
 
     const requestEntry: ExtendedHarRequest = {
@@ -133,6 +173,9 @@ export function generateHarRequest(
         httpVersion: `HTTP/${request.httpVersion || '1.1'}`,
         cookies: [],
         headers: asHarHeaders(request.headers),
+        ...(request.trailers ? {
+            _trailers: asHarHeaders(request.trailers)
+        } : {}),
         queryString: Array.from(request.parsedUrl.searchParams.entries()).map(
             ([paramKey, paramValue]) => ({
                 name: paramKey,
@@ -144,9 +187,11 @@ export function generateHarRequest(
     };
 
     if (request.body.decoded) {
-        if (request.body.decoded.byteLength > HAR_BODY_SIZE_LIMIT) {
+        if (request.body.decoded.byteLength > options.bodySizeLimit) {
             requestEntry._requestBodyStatus = 'discarded:too-large';
-            requestEntry.comment = `Body discarded during HAR generation: longer than limit of ${HAR_BODY_SIZE_LIMIT} bytes`;
+            requestEntry.comment = `Body discarded during HAR generation: longer than limit of ${
+                options.bodySizeLimit
+            } bytes`;
         } else {
             try {
                 requestEntry.postData = generateHarPostBody(
@@ -235,7 +280,10 @@ function generateHarParamsFromParsedQuery(query: querystring.ParsedUrlQuery): Ha
     }));
 }
 
-async function generateHarResponse(exchange: HttpExchange): Promise<HarFormat.Response> {
+async function generateHarResponse(
+    exchange: HttpExchange,
+    options: HarGenerationOptions
+): Promise<HarFormat.Response> {
     const { request, response } = exchange;
 
     if (!response || response === 'aborted') {
@@ -254,11 +302,15 @@ async function generateHarResponse(exchange: HttpExchange): Promise<HarFormat.Re
 
     const decoded = await response.body.decodedPromise;
 
-    let responseContent: { text: string, encoding?: string } | {};
+    let responseContent: { text: string, encoding?: string } | { comment: string};
     try {
-        if (!decoded || decoded.byteLength > HAR_BODY_SIZE_LIMIT) {
+        if (!decoded || decoded.byteLength > options.bodySizeLimit) {
             // If no body or the body is too large, don't include it
-            responseContent = {};
+            responseContent = {
+                comment: `Body discarded during HAR generation: longer than limit of ${
+                    options.bodySizeLimit
+                } bytes`
+            };
         } else {
             // If body decodes as text, keep it as text
             responseContent = { text: UTF8Decoder.decode(decoded) };
@@ -298,9 +350,7 @@ function getSourcesAsHarPages(exchanges: HttpExchange[]): HarFormat.Page[] {
 
     return _.map(exchangesBySource, (exchanges, source) => {
         const sourceStartTime = Math.min(...exchanges.map(e =>
-            'startTime' in e.timingEvents
-                ? e.timingEvents.startTime
-                : Date.now()
+            e.timingEvents.startTime ?? Date.now()
         ), Date.now());
 
         return {
@@ -312,32 +362,38 @@ function getSourcesAsHarPages(exchanges: HttpExchange[]): HarFormat.Page[] {
     });
 }
 
-async function generateHarEntry(exchange: HttpExchange): Promise<HarEntry> {
+async function generateHarHttpEntry(
+    exchange: HttpExchange,
+    options: HarGenerationOptions
+): Promise<HarEntry> {
     const { timingEvents } = exchange;
 
-    const startTime = 'startTime' in timingEvents
-        ? timingEvents.startTime
-        : new Date();
+    const startTime = timingEvents.startTime ?? Date.now();
 
-    const sendDuration = 'bodyReceivedTimestamp' in timingEvents
-        ? timingEvents.bodyReceivedTimestamp! - timingEvents.startTimestamp
+    const sendDuration = timingEvents.bodyReceivedTimestamp
+        ? timingEvents.bodyReceivedTimestamp! - timingEvents.startTimestamp!
         : 0;
-    const waitDuration = 'bodyReceivedTimestamp' in timingEvents && 'headersSentTimestamp' in timingEvents
-        ? timingEvents.headersSentTimestamp! - timingEvents.bodyReceivedTimestamp!
+    const waitDuration = timingEvents.bodyReceivedTimestamp && timingEvents.headersSentTimestamp
+        ? timingEvents.headersSentTimestamp - timingEvents.bodyReceivedTimestamp
         : 0;
-    const receiveDuration = 'responseSentTimestamp' in timingEvents
+    const receiveDuration = timingEvents.responseSentTimestamp
         ? timingEvents.responseSentTimestamp! - timingEvents.headersSentTimestamp!
         : 0;
-    const totalDuration = 'responseSentTimestamp' in timingEvents
-        ? timingEvents.responseSentTimestamp! - timingEvents.startTimestamp!
+
+    const endTimestamp = timingEvents.wsClosedTimestamp ??
+        timingEvents.responseSentTimestamp ??
+        timingEvents.abortedTimestamp;
+
+    const totalDuration = endTimestamp
+        ? endTimestamp - timingEvents.startTimestamp!
         : -1;
 
     return {
         pageref: exchange.request.source.summary,
         startedDateTime: dateFns.format(startTime),
         time: totalDuration,
-        request: await generateHarRequest(exchange.request, true),
-        response: await generateHarResponse(exchange),
+        request: await generateHarRequest(exchange.request, true, options),
+        response: await generateHarResponse(exchange, options),
         cache: {},
         timings: {
             blocked: -1,
@@ -352,11 +408,50 @@ async function generateHarEntry(exchange: HttpExchange): Promise<HarEntry> {
             wait: Math.max(waitDuration, 0),
             receive: Math.max(receiveDuration, 0)
         },
-        _pinned: exchange.pinned || undefined
+        _pinned: exchange.pinned || undefined,
+
+        ...(exchange.isWebSocket() ? {
+            _resourceType: 'websocket',
+            _webSocketMessages: exchange.messages.map((message) =>
+                generateHarWebSocketMessage(message, timingEvents)
+            ),
+            _webSocketClose: exchange.closeState && exchange.closeState !== 'aborted'
+                ? {
+                    code: exchange.closeState.closeCode,
+                    reason: exchange.closeState.closeReason,
+                    timestamp: timingEvents.wsClosedTimestamp
+                        ? timingEvents.wsClosedTimestamp / 1000 // Match _webSocketMessage format
+                        : undefined
+                }
+                : exchange.closeState
+        } : {})
     };
 }
 
-function generateHarTlsError(event: FailedTLSConnection): HarTlsErrorEntry {
+function generateHarWebSocketMessage(
+    message: StreamMessage,
+    timingEvents: Partial<TimingEvents>
+): HarWebSocketMessage {
+    return {
+        // Note that msg.direction is from the perspective of Mockttp, not the client.
+        type: message.direction === 'sent'
+                ? 'receive'
+            : message.direction === 'received'
+                ? 'send'
+            : unreachableCheck(message.direction),
+
+        opcode: message.isBinary ? 2 : 1,
+        data: message.isBinary
+            ? message.content.toString('base64')
+            : message.content.toString('utf8'),
+
+        // N.b. timestamp is precise but relative, startTime is epoch-based but imprecise,
+        // eventual result here has to be in seconds as a float.
+        time: (timingEvents.startTime! + (message.timestamp - timingEvents.startTimestamp!)) / 1000
+    };
+}
+
+function generateHarTlsError(event: FailedTlsConnection): HarTlsErrorEntry {
     const timingEvents = event.timingEvents ?? {};
 
     const startTime = 'startTime' in timingEvents
@@ -371,18 +466,16 @@ function generateHarTlsError(event: FailedTLSConnection): HarTlsErrorEntry {
         startedDateTime: dateFns.format(startTime),
         time: failureDuration,
         cause: event.failureCause,
-        hostname: event.hostname,
+        hostname: event.upstreamHostname,
         clientIPAddress: event.remoteIpAddress,
-        clientPort: event.remotePort
+        clientPort: event.remotePort,
+        tlsMetadata: event.tlsMetadata
     };
 }
 
-export type ParsedHar = {
-    requests: HarRequest[],
-    responses: HarResponse[],
-    aborts: HarRequest[],
-    tlsErrors: InputTLSRequest[]
-    pinnedIds: string[]
+export interface ParsedHar {
+    events: QueuedEvent[];
+    pinnedIds: string[];
 };
 
 const sumTimings = (
@@ -400,16 +493,14 @@ export async function parseHar(harContents: unknown): Promise<ParsedHar> {
 
     const baseId = _.random(1_000_000) + '-';
 
-    const requests: HarRequest[] = [];
-    const responses: HarResponse[] = [];
-    const aborts: HarRequest[] = [];
-    const tlsErrors: InputTLSRequest[] = [];
+    const events: QueuedEvent[] = [];
     const pinnedIds: string[] = []
 
     har.log.entries.forEach((entry, i) => {
         const id = baseId + i;
+        const isWebSocket = entry._resourceType === 'websocket';
 
-        const timingEvents: TimingEvents = Object.assign({
+        const timingEvents: TimingEvents = {
             startTime: dateFns.parse(entry.startedDateTime).getTime(),
             startTimestamp: 0,
             bodyReceivedTimestamp: sumTimings(entry.timings,
@@ -425,41 +516,96 @@ export async function parseHar(harContents: unknown): Promise<ParsedHar> {
                 'send',
                 'wait'
             )
-        }, entry.response.status !== 0
-            ? { responseSentTimestamp: entry.time }
-            : { abortedTimestamp: entry.time }
+        };
+
+        Object.assign(timingEvents,
+            entry.response.status !== 0
+                ? { responseSentTimestamp: entry.time }
+                : { abortedTimestamp: entry.time },
+
+            isWebSocket
+                ? {
+                    wsAcceptedTimestamp: timingEvents.headersSentTimestamp,
+                    wsClosedTimestamp: entry.time
+                }
+                : {}
         );
 
+
         const request = parseHarRequest(id, entry.request, timingEvents);
-        requests.push(request);
+
+        events.push({
+            type: isWebSocket ? 'websocket-request' : 'request',
+            event: request
+        });
 
         if (entry.response.status !== 0) {
-            responses.push(parseHarResponse(id, entry.response, timingEvents));
+            events.push({
+                type: isWebSocket && entry.response.status === 101
+                    ? 'websocket-accepted'
+                    : 'response',
+                event: parseHarResponse(id, entry.response, timingEvents)
+            });
         } else {
-            aborts.push(request);
+            events.push({ type: 'abort', event: request });
+        }
+
+        if (isWebSocket) {
+            events.push(...entry._webSocketMessages?.map(message => ({
+                type: `websocket-message-${message.type === 'send' ? 'received' : 'sent'}` as const,
+                event: {
+                    streamId: request.id,
+                    direction: message.type === 'send' ? 'received' : 'sent',
+                    isBinary: message.opcode === 2,
+                    content: Buffer.from(message.data, message.opcode === 2 ? 'base64' : 'utf8'),
+                    eventTimestamp: (message.time * 1000) - timingEvents.startTime,
+                    timingEvents: timingEvents,
+                    tags: []
+                } satisfies InputWebSocketMessage
+            })) ?? []);
+
+            const closeEvent = entry._webSocketClose;
+
+            if (closeEvent && closeEvent !== 'aborted') {
+                events.push({
+                    type: 'websocket-close',
+                    event: {
+                        streamId: request.id,
+                        closeCode: closeEvent.code,
+                        closeReason: closeEvent.reason ?? "",
+                        timingEvents: timingEvents,
+                        tags: []
+                    }
+                });
+            } else {
+                // N.b. WebSockets can abort _after_ the response event!
+                events.push({ type: 'abort', event: request });
+            }
         }
 
         if (entry._pinned) pinnedIds.push(id);
     });
 
     if (har.log._tlsErrors) {
-        har.log._tlsErrors.forEach((entry, i) => {
-            tlsErrors.push({
+        events.push(...har.log._tlsErrors.map((entry) => ({
+            type: 'tls-client-error' as const,
+            event: {
                 failureCause: entry.cause,
                 hostname: entry.hostname,
                 remoteIpAddress: entry.clientIPAddress,
                 remotePort: entry.clientPort,
+                tlsMetadata: entry.tlsMetadata ?? {},
                 tags: [],
                 timingEvents: {
                     startTime: dateFns.parse(entry.startedDateTime).getTime(),
                     connectTimestamp: 0,
                     failureTimestamp: entry.time
                 }
-            });
-        });
+            }
+        })));
     }
 
-    return { requests, responses, aborts, tlsErrors, pinnedIds };
+    return { events, pinnedIds };
 }
 
 // Mutatively cleans & returns the HAR, to tidy up irrelevant but potentially
@@ -467,16 +613,11 @@ export async function parseHar(harContents: unknown): Promise<ParsedHar> {
 function cleanRawHarData(harContents: any) {
     const entries = harContents?.log?.entries ?? [];
 
-    // Some HAR exports include invalid serverIPAddresses, which fail validation.
-    // Somebody is wrong here, but we don't really care - just drop it entirely.
     entries.forEach((entry: any) => {
-        if (entry.serverIPAddress === "") {
-            delete entry.serverIPAddress;
-        }
-
-        if (entry.serverIPAddress === "[::1]") {
-            entry.serverIPAddress = "::1";
-        }
+        // Some HAR exports include invalid serverIPAddresses, which fail validation.
+        // Somebody is wrong here, but we don't really care, we never use this data;
+        // just drop it entirely instead.
+        delete entry.serverIPAddress;
 
         // FF fails to write headersSize or writes null for req/res that has no headers.
         // We don't use it anyway - set it to -1 if it's missing
@@ -566,7 +707,8 @@ function parseHarRequest(
         id,
         timingEvents,
         tags: [],
-        matchedRuleId: "?",
+        matchedRuleId: false,
+        httpVersion: parseHttpVersion(request.httpVersion, request.headers),
         protocol: request.url.split(':')[0],
         method: request.method,
         url: request.url,
@@ -581,8 +723,31 @@ function parseHarRequest(
                 ? parseHarRequestContents(request._content)
                 : parseHarPostData(request.postData),
             encodedLength: request.bodySize
+        },
+        rawTrailers: request._trailers?.map(t => [t.name, t.value]) ?? [],
+        trailers: asHtkHeaders(request._trailers ?? []) as Trailers
+    }
+}
+
+function parseHttpVersion(
+    versionString: string | undefined,
+    headers: HarFormat.Header[]
+) {
+    if (!versionString) {
+        // Make a best guess:
+        if (headers.some(({ name }) => name.startsWith(':'))) {
+            return '2.0';
+        } else {
+            return '1.1';
         }
     }
+
+    const regexMatch = /^(HTTP\/)?([\d\.]+)$/i.exec(versionString);
+    if (regexMatch) {
+        return regexMatch[2];
+    }
+
+    throw TypeError(`Invalid HTTP version: ${versionString}`);
 }
 
 function parseHarRequestContents(data: RequestContentData): Buffer {
@@ -596,10 +761,10 @@ function parseHarRequestContents(data: RequestContentData): Buffer {
 function parseHarPostData(data: HarFormat.PostData | undefined): Buffer {
     if (data?.text) {
         // Prefer raw exported 'text' data, when available
-        return Buffer.from(data.text, 'utf8');
+        return stringToBuffer(data.text, 'utf8');
     } else if (data?.params) {
         // If only 'params' is available, stringify and use that.
-        return Buffer.from(
+        return stringToBuffer(
             // Go from array of key-value objects to object of key -> value array:
             querystring.stringify(_(data.params)
                 .groupBy(({ name }) => name)
@@ -608,13 +773,13 @@ function parseHarPostData(data: HarFormat.PostData | undefined): Buffer {
             )
         );
     } else {
-        return Buffer.from('');
+        return stringToBuffer('');
     }
 }
 
 function parseHarResponse(
     id: string,
-    response: HarFormat.Response,
+    response: ExtendedHarResponse,
     timingEvents: TimingEvents
 ): HarResponse {
     return {
@@ -633,6 +798,8 @@ function parseHarResponse(
             encodedLength: (!response.bodySize || response.bodySize === -1)
                 ? 0 // If bodySize is missing or inaccessible, just zero it
                 : response.bodySize
-        }
+        },
+        rawTrailers: response._trailers?.map(t => [t.name, t.value]) ?? [],
+        trailers: asHtkHeaders(response._trailers ?? []) as Trailers,
     }
 }

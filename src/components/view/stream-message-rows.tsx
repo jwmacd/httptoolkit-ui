@@ -5,7 +5,7 @@ import { disposeOnUnmount, observer } from 'mobx-react';
 import * as portals from 'react-reverse-portal';
 
 import { styled, warningColor } from '../../styles';
-import { asBuffer } from '../../util';
+import { asBuffer, bufferToString } from '../../util/buffer';
 import { ArrowIcon } from '../../icons';
 
 import {
@@ -13,7 +13,7 @@ import {
     getCompatibleTypes,
     getContentEditorName
 } from '../../model/events/content-types';
-import { getReadableSize } from '../../model/events/bodies';
+import { getReadableSize } from '../../util/buffer';
 import { StreamMessage } from '../../model/events/stream-message';
 
 import { ContentLabel, ContentMonoValue } from '../common/text-content';
@@ -21,7 +21,8 @@ import { Pill, PillSelector } from '../common/pill';
 import { IconButton } from '../common/icon-button';
 
 import { ContentViewer } from '../editor/content-viewer';
-import { ThemedSelfSizedEditor } from '../editor/base-editor';
+import { SelfSizedEditor } from '../editor/base-editor';
+import { EditorCardContent } from '../editor/body-card-components';
 
 const visualDirection = (message: StreamMessage) =>
     message.direction === 'sent'
@@ -57,12 +58,12 @@ export const StreamMessageCollapsedRow = React.memo((p: {
     <MessageArrow selected={false} messageDirection={visualDirection(p.message)} />
     <CollapsedStreamContent>
         {
-            p.message.content
-            // Limit the length - no point showing huge messages here. On a typical UI, we show about
-            // 100 chars here, so this should give us a good bit of buffer
-            .slice(0, 200)
-            // Show everything as UTF-8 - binary data can be viewed up close instead.
-            .toString('utf8')
+            bufferToString( // Show everything as UTF-8 - binary data can be viewed up close instead.
+                p.message.content
+                // Limit the length - no point showing huge messages here. On a typical UI, we show about
+                // 100 chars here, so this should give us a good bit of buffer
+                .slice(0, 200)
+            )
         }
     </CollapsedStreamContent>
     {
@@ -95,7 +96,7 @@ const MessageArrow = styled(React.memo((p: {
         padding: 0;
         color: ${p => p.selected
             ? p.theme.popColor
-            : p.theme.containerBorder
+            : p.theme.containerWatermark
         };
     }
 
@@ -143,7 +144,7 @@ const CollapsedStreamContent = styled(ContentMonoValue)`
 interface MessageEditorRowProps {
     streamId: string,
     message: StreamMessage,
-    editorNode: portals.HtmlPortalNode<typeof ThemedSelfSizedEditor>,
+    editorNode: portals.HtmlPortalNode<typeof SelfSizedEditor>,
     isPaidUser: boolean,
     onExportMessage: (message: StreamMessage) => void
 }
@@ -221,8 +222,10 @@ export class StreamMessageEditorRow extends React.Component<MessageEditorRowProp
             undefined,
             asBuffer(message.content)
         );
-        const contentType = _.includes(compatibleContentTypes, this.selectedContentType) ?
-            this.selectedContentType! : message.contentType;
+
+        const contentType = _.includes(compatibleContentTypes, this.selectedContentType)
+            ? this.selectedContentType!
+            : message.contentType;
 
         const messageDirection = message.direction === 'sent' ? 'left' : 'right';
 
@@ -281,7 +284,7 @@ export class StreamMessageEditorRow extends React.Component<MessageEditorRowProp
                 />
                 <Pill>{ getReadableSize(message.content.byteLength) }</Pill>
             </EditorRowHeader>
-            <EditorCardContent>
+            <RowEditorContent showFullBorder={false}>
                 <ContentViewer
                     contentId={`ws-${streamId}-${message.messageIndex}`}
                     editorNode={editorNode}
@@ -292,7 +295,7 @@ export class StreamMessageEditorRow extends React.Component<MessageEditorRowProp
                 >
                     {message.content}
                 </ContentViewer>
-            </EditorCardContent>
+            </RowEditorContent>
         </EditorRowContainer>;
     }
 
@@ -310,6 +313,7 @@ const EditorRowHeader = styled.div<{ messageDirection: 'left' | 'right' }>`
     display: flex;
     flex-direction: row;
     align-items: center;
+    gap: 8px;
 
     padding: 4px 15px 4px 0;
 
@@ -326,6 +330,8 @@ const EditorRowHeader = styled.div<{ messageDirection: 'left' | 'right' }>`
         flex-grow: 1;
         text-overflow: ellipsis;
         overflow: hidden;
+
+        margin-left: -8px;
     }
 
     > ${IconButton} {
@@ -339,20 +345,8 @@ const EditorRowHeader = styled.div<{ messageDirection: 'left' | 'right' }>`
     }
 `;
 
-export const EditorCardContent = styled.div`
-    background-color: ${p => p.theme.highlightBackground};
-    color: ${p => p.theme.highlightColor};
-
-    .monaco-editor-overlaymessage {
-        display: none;
-    }
-
-    position: relative;
-    flex-grow: 1;
-
-    /*
-    Allows shrinking smaller than content, to allow scrolling overflow e.g. for
-    scrollable URL param content
-    */
-    min-height: 0;
+const RowEditorContent = styled(EditorCardContent)`
+    /* Undo the whole-card specific bits of styling */
+    border-top: none;
+    margin: 0;
 `;

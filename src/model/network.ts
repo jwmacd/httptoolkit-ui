@@ -1,8 +1,16 @@
 import * as ipaddr from 'ipaddr.js';
-import { reportError } from '../errors';
+import { logError } from '../errors';
 
 export function isValidPort(port: number): boolean {
     return port > 0 && port <= 65535;
+}
+
+export function isValidHost(host: string | undefined): boolean {
+    return !!host?.match(/^[A-Za-z0-9\-.]+(:\d+)?$/);
+}
+
+export function isValidHostname(hostname: string | undefined): boolean {
+    return !!hostname?.match(/^[A-Za-z0-9\-.]+$/);
 }
 
 function isIPv6(ip: ipaddr.IPv4 | ipaddr.IPv6): ip is ipaddr.IPv6 {
@@ -23,7 +31,7 @@ export function getReadableIP(ip: string) {
     try {
         parsedIp = ipaddr.parse(ip);
     } catch (e) {
-        reportError('Failed to parse IP', { ip: ip });
+        logError('Failed to parse IP', { ip: ip });
         return ip;
     }
 

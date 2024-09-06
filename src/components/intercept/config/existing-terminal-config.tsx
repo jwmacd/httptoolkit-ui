@@ -11,7 +11,7 @@ import {
 } from '../../../services/service-versions';
 
 import { AccountStore } from '../../../model/account/account-store';
-import { UiStore } from '../../../model/ui-store';
+import { UiStore } from '../../../model/ui/ui-store';
 import { InterceptorStore } from '../../../model/interception/interceptor-store';
 import { Interceptor } from '../../../model/interception/interceptors';
 
@@ -39,9 +39,12 @@ const CopyableCommand = styled((p: {
         pointer-events: none;
     `}
 
-    border: solid 1px ${p => p.theme.containerBorder};
-    background-color: ${p => p.theme.highlightBackground};
-    color: ${p => p.theme.highlightColor};
+    background-color: ${p => p.theme.inputBackground};
+    &:hover {
+        background-color: ${p => p.theme.inputHoverBackground};
+    }
+    border: solid 1px ${p => p.theme.inputBorder};
+    color: ${p => p.theme.inputColor};
 
     padding: 10px 75px 10px 20px;
     border-radius: 4px;
@@ -94,7 +97,7 @@ type ShellDefinition = { command: string, description: string };
 @observer
 class ExistingTerminalConfig extends React.Component<{
     interceptor: Interceptor,
-    activateInterceptor: (options: { dockerEnabled: boolean }) => Promise<{
+    activateInterceptor: () => Promise<{
         port: number,
         commands?: {
             [shellName: string]: ShellDefinition
@@ -159,9 +162,7 @@ class ExistingTerminalConfig extends React.Component<{
     }
 
     async componentDidMount() {
-        const { port, commands } = await this.props.activateInterceptor({
-            dockerEnabled: this.props.accountStore!.featureFlags.includes('docker')
-        });
+        const { port, commands } = await this.props.activateInterceptor();
 
         runInAction(() => {
             if (!commands) {
@@ -208,8 +209,8 @@ class ExistingTerminalConfig extends React.Component<{
     render() {
         return <ConfigContainer>
             <p>
-                Run the command below in any {this.shellDescription} terminal on this machine, to
-                immediately enable interception for all new processes started there.
+                Run the command below in any {this.shellDescription} terminal on this machine to
+                intercept all new processes & containers launched there.
             </p>
             { this.shouldShowDropdown
                 ? <PillSelector<string>

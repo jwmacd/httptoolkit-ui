@@ -3,7 +3,7 @@ import * as _ from 'lodash';
 import { UnreachableCheck } from '../../util/error';
 
 import {
-    HtkMockRule,
+    HtkRule,
     RuleType,
     HandlerClassKey,
     MatcherClassKey
@@ -96,11 +96,85 @@ export function summarizeMatcherClass(key: MatcherClassKey): string {
         case 'callback':
         case 'multipart-form-data':
         case 'raw-body-regexp':
+        case 'regex-url':
             throw new Error(`${key} handler should not be used directly`);
         default:
             throw new UnreachableCheck(key);
     }
 };
+
+export function nameHandlerClass(key: HandlerClassKey): string {
+    switch (key) {
+        case 'simple':
+            return "fixed response";
+        case 'file':
+            return "file response";
+        case 'forward-to-host':
+        case 'ws-forward-to-host':
+            return "forwarding";
+        case 'passthrough':
+        case 'ws-passthrough':
+            return "passthrough";
+        case 'req-res-transformer':
+            return "transform";
+        case 'request-breakpoint':
+        case 'response-breakpoint':
+        case 'request-and-response-breakpoint':
+            return "breakpoint";
+        case 'timeout':
+            return "timeout";
+        case 'close-connection':
+            return "connection close";
+        case 'reset-connection':
+            return "connection reset";
+
+        case 'ws-reject':
+            return "reject";
+        case 'ws-listen':
+            return "listen";
+        case 'ws-echo':
+            return "echo";
+
+        case 'eth-call-result':
+        case 'eth-number-result':
+        case 'eth-hash-result':
+        case 'eth-receipt-result':
+        case 'eth-block-result':
+            return "fixed result";
+        case 'eth-error':
+            return "error";
+
+        case 'ipfs-cat-text':
+        case 'ipfs-add-result':
+        case 'ipns-resolve-result':
+        case 'ipns-publish-result':
+        case 'ipfs-pins-result':
+        case 'ipfs-pin-ls-result':
+            return "fixed result";
+        case 'ipfs-cat-file':
+            return "file";
+
+        case 'wait-for-duration':
+        case 'wait-for-rtc-data-channel':
+        case 'wait-for-rtc-track':
+        case 'wait-for-rtc-media':
+        case 'wait-for-rtc-message':
+        case 'create-rtc-data-channel':
+        case 'send-rtc-data-message':
+        case 'close-rtc-connection':
+        case 'echo-rtc':
+        case 'rtc-dynamic-proxy':
+            return 'WebRTC';
+
+        case 'json-rpc-response':
+        case 'rtc-peer-proxy':
+        case 'callback':
+        case 'stream':
+            throw new Error(`${key} handler should not be used directly`);
+        default:
+            throw new UnreachableCheck(key);
+    }
+}
 
 export function summarizeHandlerClass(key: HandlerClassKey): string {
     switch (key) {
@@ -112,8 +186,6 @@ export function summarizeHandlerClass(key: HandlerClassKey): string {
             return "Forward the request to a different host";
         case 'passthrough':
             return "Pass the request on to its destination";
-        case 'ws-passthrough':
-            return "Pass the WebSocket through to its destination";
         case 'req-res-transformer':
             return "Transform the real request or response automatically";
         case 'request-breakpoint':
@@ -125,8 +197,14 @@ export function summarizeHandlerClass(key: HandlerClassKey): string {
         case 'timeout':
             return "Time out with no response";
         case 'close-connection':
-            return "Close the connection immediately";
+            return "Close the connection";
+        case 'reset-connection':
+            return "Forcibly reset the connection";
 
+        case 'ws-passthrough':
+            return "Pass the WebSocket through to its destination";
+        case 'ws-forward-to-host':
+            return "Forward the WebSocket to a different host";
         case 'ws-reject':
             return "Reject the WebSocket setup request";
         case 'ws-listen':
@@ -195,7 +273,7 @@ export function summarizeHandlerClass(key: HandlerClassKey): string {
 // Summarize the matchers of an instantiated rule
 // Slight varation on the Mockttp explanation to make the
 // comma positioning more consistent for UX of changing rules
-export function summarizeMatcher(rule: HtkMockRule): string {
+export function summarizeMatcher(rule: HtkRule): string {
     const { matchers } = rule;
 
     if (matchers.length === 0) return 'Never';
@@ -216,7 +294,7 @@ export function summarizeMatcher(rule: HtkMockRule): string {
 }
 
 // Summarize the handler of an instantiated rule
-export function summarizeHandler(rule: HtkMockRule): string {
+export function summarizeHandler(rule: HtkRule): string {
     if ('steps' in rule) {
         const stepExplanations = rule.steps.map(s => s.explain());
         return withFirstCharUppercased(

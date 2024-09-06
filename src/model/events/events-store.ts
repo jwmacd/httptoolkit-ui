@@ -8,9 +8,11 @@ import { HarParseError } from 'har-validator';
 
 import {
     InputResponse,
-    InputTLSRequest,
+    InputTlsFailure,
+    InputTlsPassthrough,
     InputInitiatedRequest,
     InputCompletedRequest,
+    InputFailedRequest,
     InputClientError,
     CollectedEvent,
     InputWebSocketMessage,
@@ -25,19 +27,22 @@ import {
     InputRTCMediaTrackOpened,
     InputRTCMediaStats,
     InputRTCMediaTrackClosed,
-    InputRTCExternalPeerAttached
+    InputRTCExternalPeerAttached,
+    TimingEvents
 } from '../../types';
 
 import { lazyObservablePromise } from '../../util/observable';
-import { reportError } from '../../errors';
+import { logError } from '../../errors';
 
 import { ProxyStore } from "../proxy-store";
 import { ApiStore } from '../api/api-store';
+import { RulesStore } from '../rules/rules-store';
+import { findItem, isRuleGroup } from '../rules/rules-structure';
 
-import { parseSource } from '../http/sources';
 import { parseHar } from '../http/har';
 
-import { FailedTLSConnection } from './failed-tls-connection';
+import { FailedTlsConnection } from '../tls/failed-tls-connection';
+import { TlsTunnel } from '../tls/tls-tunnel';
 import { HttpExchange } from '../http/exchange';
 import { WebSocketStream } from '../websockets/websocket-stream';
 import { RTCConnection } from '../webrtc/rtc-connection';
@@ -58,8 +63,10 @@ type EventTypesMap = {
     'websocket-message-sent': InputWebSocketMessage,
     'websocket-close': InputWebSocketClose,
     // Mockttp misc:
-    'abort': InputInitiatedRequest
-    'tls-client-error': InputTLSRequest,
+    'abort': InputInitiatedRequest,
+    'tls-client-error': InputTlsFailure,
+    'tls-passthrough-opened': InputTlsPassthrough,
+    'tls-passthrough-closed': InputTlsPassthrough,
     'client-error': InputClientError,
 } & {
     // MockRTC:
@@ -77,6 +84,8 @@ const mockttpEventTypes = [
     'websocket-close',
     'abort',
     'tls-client-error',
+    'tls-passthrough-opened',
+    'tls-passthrough-closed',
     'client-error'
 ] as const;
 
@@ -100,7 +109,7 @@ type EventType =
     | MockttpEventType
     | MockRTCEventType;
 
-type QueuedEvent = ({
+export type QueuedEvent = ({
     [T in EventType]: { type: T, event: EventTypesMap[T] }
 }[EventType]);
 
@@ -120,19 +129,22 @@ type OrphanableQueuedEvent<T extends
     | 'media-track-opened'
     | 'media-track-stats'
     | 'media-track-closed'
+    | 'tls-passthrough-closed'
 > = { type: T, event: EventTypesMap[T] };
 
 export class EventsStore {
 
     constructor(
         private proxyStore: ProxyStore,
-        private apiStore: ApiStore
+        private apiStore: ApiStore,
+        private rulesStore: RulesStore
     ) { }
 
     readonly initialized = lazyObservablePromise(async () => {
         await Promise.all([
             this.proxyStore.initialized,
-            this.apiStore.initialized
+            this.apiStore.initialized,
+            this.rulesStore.initialized
         ]);
 
         mockttpEventTypes.forEach(<T extends MockttpEventType>(eventName: T) => {
@@ -198,9 +210,7 @@ export class EventsStore {
     @computed.struct
     get activeSources() {
         return _(this.exchanges)
-            .map(e => e.request.headers['user-agent'])
-            .uniq()
-            .map(parseSource)
+            .map(e => e.request.source)
             .uniqBy(s => s.summary)
             .value();
     }
@@ -240,6 +250,11 @@ export class EventsStore {
                     return this.markWebSocketClosed(queuedEvent.event);
                 case 'abort':
                     return this.markRequestAborted(queuedEvent.event);
+                case 'tls-passthrough-opened':
+                    this.addTlsTunnel(queuedEvent.event);
+                    return this.checkForOrphan(queuedEvent.event.id);
+                case 'tls-passthrough-closed':
+                    return this.markTlsTunnelClosed(queuedEvent.event);
                 case 'tls-client-error':
                     return this.addFailedTlsRequest(queuedEvent.event);
                 case 'client-error':
@@ -268,7 +283,7 @@ export class EventsStore {
         } catch (e) {
             // It's possible we might fail to parse an input event. This shouldn't happen, but if it
             // does it's better to drop that one event and continue instead of breaking completely.
-            reportError(e);
+            logError(e);
         }
     }
 
@@ -302,6 +317,20 @@ export class EventsStore {
         }
     }
 
+    private getMatchedRule(request: InputCompletedRequest) {
+        if (!request.matchedRuleId) return false;
+
+        const matchedItem = findItem(this.rulesStore.rules, { id: request.matchedRuleId });
+
+        // This shouldn't really happen, but could in race conditions with rule editing:
+        if (!matchedItem) return false;
+
+        // This should never happen, but it's good to check:
+        if (isRuleGroup(matchedItem)) throw new Error('Request event unexpectedly matched rule group');
+
+        return matchedItem;
+    }
+
     @action
     private addCompletedRequest(request: InputCompletedRequest) {
         // The request should already exist: we get an event when the initial path & headers
@@ -309,15 +338,21 @@ export class EventsStore {
         // We add the request from scratch if it's somehow missing, which can happen given
         // races or if the server doesn't support request-initiated events.
         const existingEventIndex = _.findIndex(this.events, { id: request.id });
+
+        let event: HttpExchange;
         if (existingEventIndex >= 0) {
-            (this.events[existingEventIndex] as HttpExchange).updateFromCompletedRequest(request);
+            event = this.events[existingEventIndex] as HttpExchange;
         } else {
-            this.events.push(new HttpExchange(this.apiStore, request));
+            event = new HttpExchange(this.apiStore, { ...request });
+            // ^ This mutates request to use it, so we have to shallow-clone to use it below too:
+            this.events.push(event);
         }
+
+        event.updateFromCompletedRequest(request, this.getMatchedRule(request));
     }
 
     @action
-    private markRequestAborted(request: InputInitiatedRequest) {
+    private markRequestAborted(request: InputFailedRequest) {
         const exchange = _.find(this.exchanges, { id: request.id });
 
         if (!exchange) {
@@ -344,7 +379,11 @@ export class EventsStore {
 
     @action
     private addWebSocketRequest(request: InputCompletedRequest) {
-        this.events.push(new WebSocketStream(this.apiStore, request));
+        const stream = new WebSocketStream(this.apiStore, { ...request });
+        // ^ This mutates request to use it, so we have to shallow-clone to use it below too
+
+        stream.updateFromCompletedRequest(request, this.getMatchedRule(request));
+        this.events.push(stream);
     }
 
     @action
@@ -383,7 +422,9 @@ export class EventsStore {
 
         if (!stream) {
             // Handle this later, once the request has arrived
-            this.orphanedEvents[close.streamId] = { type: 'websocket-close', event: close };
+            this.orphanedEvents[close.streamId] = {
+                type: 'websocket-close', event: close
+            };
             return;
         }
 
@@ -391,14 +432,34 @@ export class EventsStore {
     }
 
     @action
-    private addFailedTlsRequest(request: InputTLSRequest) {
+    private addTlsTunnel(openEvent: InputTlsPassthrough) {
+        this.events.push(new TlsTunnel(openEvent));
+    }
+
+    @action
+    private markTlsTunnelClosed(closeEvent: InputTlsPassthrough) {
+        const tunnel = _.find(this.events, { id: closeEvent.id }) as TlsTunnel | undefined;
+
+        if (!tunnel) {
+            // Handle this later, once the tunnel open event has arrived
+            this.orphanedEvents[closeEvent.id] = {
+                type: 'tls-passthrough-closed', event: close
+            };
+            return;
+        }
+
+        tunnel.markClosed(closeEvent);
+    }
+
+    @action
+    private addFailedTlsRequest(request: InputTlsFailure) {
         if (_.some(this.events, (event) =>
-            'hostname' in event &&
-            event.hostname === request.hostname &&
+            event.isTlsFailure() &&
+            event.upstreamHostname === request.hostname &&
             event.remoteIpAddress === request.remoteIpAddress
         )) return; // Drop duplicate TLS failures
 
-        this.events.push(new FailedTLSConnection(request));
+        this.events.push(new FailedTlsConnection(request));
     }
 
     @action
@@ -558,19 +619,17 @@ export class EventsStore {
     }
 
     async loadFromHar(harContents: {}) {
-        const {
-            requests,
-            responses,
-            aborts,
-            tlsErrors,
-            pinnedIds
-        } = await parseHar(harContents).catch((harParseError: HarParseError) => {
+        const { events, pinnedIds } = await parseHar(harContents).catch((harParseError: HarParseError) => {
             // Log all suberrors, for easier reporting & debugging.
             // This does not include HAR data - only schema errors like
             // 'bodySize is missing' at 'entries[1].request'
-            harParseError.errors.forEach((error) => {
-                console.log(error);
-            });
+            if (harParseError.errors) {
+                harParseError.errors.forEach((error) => {
+                    console.log(error);
+                });
+            } else {
+                console.log(harParseError);
+            }
             throw harParseError;
         });
 
@@ -578,17 +637,19 @@ export class EventsStore {
         // to the UI like any other seen request data. Arguably we could call addRequest &
         // setResponse etc directly, but this is nicer if the UI thread is already under strain.
 
-        // First, we put the request & TLS error events together in order:
-        this.eventQueue.push(..._.sortBy([
-            ...requests.map(r => ({ type: 'request' as const, event: r })),
-            ...tlsErrors.map(r => ({ type: 'tls-client-error' as const, event: r }))
-        ], e => e.event.timingEvents.startTime));
-
-        // Then we add responses & aborts. They just update requests, so order doesn't matter:
-        this.eventQueue.push(
-            ...responses.map(r => ({ type: 'response' as const, event: r })),
-            ...aborts.map(r => ({ type: 'abort' as const, event: r }))
+        // First, we run through the request & TLS error events together, in order, since these
+        // define the initial event ordering
+        const [initialEvents, updateEvents] = _.partition(events, ({ type }) =>
+            type === 'request' ||
+            type === 'websocket-request' ||
+            type === 'tls-client-error'
         );
+        this.eventQueue.push(..._.sortBy(initialEvents, (e) =>
+            (e.event as { timingEvents: TimingEvents }).timingEvents.startTime
+        ));
+
+        // Then we add everything else (responses & aborts). They just update, so order doesn't matter:
+        this.eventQueue.push(...updateEvents);
 
         this.queueEventFlush();
 
@@ -599,6 +660,16 @@ export class EventsStore {
                 this.events.find(e => e.id === id)!.pinned = true;
             })));
         }
+    }
+
+    @action
+    recordSentRequest(request: InputCompletedRequest): HttpExchange {
+        const exchange = new HttpExchange(this.apiStore, { ...request });
+        // ^ This mutates request to use it, so we have to shallow-clone to use it below too:
+        exchange.updateFromCompletedRequest(request, false);
+
+        this.events.push(exchange);
+        return exchange;
     }
 
 }

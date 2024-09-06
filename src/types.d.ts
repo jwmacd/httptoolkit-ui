@@ -3,17 +3,21 @@ import type { ComponentClass } from 'react';
 import type {
     InitiatedRequest as MockttpInitiatedRequest,
     CompletedRequest as MockttpCompletedRequest,
+    AbortedRequest as MockttpAbortedRequest,
     CompletedResponse as MockttpResponse,
     WebSocketMessage as MockttpWebSocketMessage,
     WebSocketClose as MockttpWebSocketClose,
-    SubscribableEvent as MockttpEvent
-} from 'mockttp';
-import type {
+    SubscribableEvent as MockttpEvent,
     Headers,
+    RawHeaders,
+    Trailers,
+    RawTrailers,
     TimingEvents,
-    TlsRequest as TLSRequest,
+    TlsHandshakeFailure,
+    TlsPassthroughEvent,
+    TlsSocketMetadata,
     ClientError
-} from 'mockttp/dist/types';
+} from 'mockttp';
 import type { PortRange } from 'mockttp/dist/mockttp';
 import type {
     PassThroughResponse as MockttpBreakpointedResponse,
@@ -28,7 +32,8 @@ import * as MockRTC from 'mockrtc';
 
 import type { ObservablePromise } from './util/observable';
 
-import type { FailedTLSConnection } from './model/events/failed-tls-connection';
+import type { FailedTlsConnection } from './model/tls/failed-tls-connection';
+import type { TlsTunnel } from './model/tls/tls-tunnel';
 import type { HttpExchange } from './model/http/exchange';
 import type { WebSocketStream } from './model/websockets/websocket-stream';
 import type { RTCConnection } from './model/webrtc/rtc-connection';
@@ -36,21 +41,37 @@ import type { RTCDataChannel } from './model/webrtc/rtc-data-channel';
 import type { RTCMediaTrack } from './model/webrtc/rtc-media-track';
 
 import type { TrafficSource } from './model/http/sources';
+import type { EditableBody } from './model/http/editable-body';
 import type { ViewableContentType } from './model/events/content-types';
 
+// These are the HAR types as returned from parseHar(), not the raw types as defined in the HAR itself
 export type HarBody = { encodedLength: number, decoded: Buffer };
 export type HarRequest = Omit<MockttpCompletedRequest, 'body' | 'timingEvents' | 'matchedRuleId'> &
-    { body: HarBody; timingEvents: TimingEvents, matchedRuleId: "?" };
+    { body: HarBody; timingEvents: TimingEvents, matchedRuleId: false };
 export type HarResponse = Omit<MockttpResponse, 'body' | 'timingEvents'> &
     { body: HarBody; timingEvents: TimingEvents };
 
+export type SentRequest = Omit<MockttpInitiatedRequest, 'matchedRuleId' | 'body'> &
+    { matchedRuleId: false, body: { buffer: Buffer } };
+export type SentRequestResponse = Omit<MockttpResponse, 'body'> &
+    { body: { buffer: Buffer } };
+export type SentRequestError = Pick<MockttpAbortedRequest, 'id' | 'timingEvents' | 'tags'> & {
+    error: {
+        code?: string;
+        message?: string;
+        stack?: string;
+    };
+}
+
 export type InputHTTPEvent = MockttpEvent;
 export type InputClientError = ClientError;
-export type InputTLSRequest = TLSRequest;
-export type InputInitiatedRequest = MockttpInitiatedRequest;
-export type InputCompletedRequest = MockttpCompletedRequest | HarRequest;
+export type InputTlsFailure = TlsHandshakeFailure;
+export type InputTlsPassthrough = TlsPassthroughEvent;
+export type InputInitiatedRequest = MockttpInitiatedRequest | HarRequest;
+export type InputCompletedRequest = MockttpCompletedRequest | HarRequest | SentRequest;
 export type InputRequest = InputInitiatedRequest | InputCompletedRequest;
-export type InputResponse = MockttpResponse | HarResponse;
+export type InputFailedRequest = MockttpAbortedRequest | ClientError['request'] | SentRequestError;
+export type InputResponse = MockttpResponse | HarResponse | SentRequestResponse;
 export type InputMessage = InputRequest | InputResponse;
 
 export type InputWebSocketMessage = MockttpWebSocketMessage;
@@ -74,18 +95,12 @@ export type InputRTCMediaTrackClosed = InputRTCEventData['media-track-closed'];
 
 export type InputStreamMessage = InputRTCMessage | InputWebSocketMessage;
 
-export interface BreakpointBody {
-    decoded: Buffer;
-    encoded: ObservablePromise<Buffer>;
-    contentLength: number;
-}
-
 // Define the restricted form of request BP result we'll use internally
 export type BreakpointRequestResult = {
     method: string,
     url: string,
-    headers: Headers,
-    body: BreakpointBody
+    rawHeaders: RawHeaders,
+    body: EditableBody
 };
 
 // We still need this for the places where we actually interact with Mockttp
@@ -99,8 +114,8 @@ export {
 export type BreakpointResponseResult = {
     statusCode: number,
     statusMessage?: string,
-    headers: Headers,
-    body: BreakpointBody
+    rawHeaders: RawHeaders,
+    body: EditableBody
 };
 
 export {
@@ -113,7 +128,9 @@ export type HtkRequest = Omit<InputRequest, 'body' | 'path'> & {
     source: TrafficSource,
     contentType: ViewableContentType,
     cache: Map<symbol, unknown>,
-    body: MessageBody
+    body: MessageBody,
+    trailers?: Trailers,
+    rawTrailers?: RawTrailers
 };
 
 export type HtkResponse = Omit<InputResponse, 'body'> & {
@@ -126,11 +143,13 @@ export type MessageBody = {
     encoded: { byteLength: number } | Buffer,
     decoded: Buffer | undefined,
     decodedPromise: ObservablePromise<Buffer | undefined>,
+    decodingError: Error | undefined,
     cleanup(): void
 };
 
 export type {
-    FailedTLSConnection,
+    FailedTlsConnection,
+    TlsTunnel,
     HttpExchange,
     WebSocketStream,
     RTCConnection,
@@ -138,7 +157,8 @@ export type {
     RTCMediaTrack
 };
 export type CollectedEvent =
-    | FailedTLSConnection
+    | FailedTlsConnection
+    | TlsTunnel
     | HttpExchange
     | WebSocketStream
     | RTCConnection
@@ -150,8 +170,12 @@ export type RTCStream = RTCDataChannel | RTCMediaTrack;
 
 export {
     Headers,
+    RawHeaders,
+    Trailers,
+    RawTrailers,
     PortRange,
-    TimingEvents
+    TimingEvents,
+    TlsSocketMetadata
 };
 
 // Should only be created in the process of sanitizing, so every object with an

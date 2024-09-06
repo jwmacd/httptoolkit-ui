@@ -1,11 +1,10 @@
 import * as _ from 'lodash';
 import * as React from 'react';
-import { action, observable, reaction } from 'mobx';
+import { action, autorun, comparer, observable, reaction } from 'mobx';
 import { disposeOnUnmount, observer } from 'mobx-react';
 
 import { styled } from '../../styles';
 
-import { clickOnEnter } from '../component-utils';
 import { Button, TextInput } from './inputs';
 import { Icon } from '../../icons';
 
@@ -13,6 +12,8 @@ export type Pair = { key: string, value: string, disabled?: true };
 export type PairsArray = Array<Pair>;
 
 interface EditablePairsProps<R = PairsArray> {
+    className?: string;
+
     pairs: PairsArray;
 
     onChange: (pairs: R) => void;
@@ -29,7 +30,8 @@ interface EditablePairsProps<R = PairsArray> {
     transformInput?: (pairs: PairsArray) => PairsArray;
 
     keyTitle?: string;
-    keyPattern?: string;
+    // Either a pattern string, or a validation function
+    keyValidation?: string | ((key: string) => true | string);
 
     keyPlaceholder: string;
     valuePlaceholder: string;
@@ -88,8 +90,14 @@ export class ReadOnlyPairs extends React.Component<{
 @observer
 export class EditablePairs<R> extends React.Component<EditablePairsProps<R>> {
 
+    private containerRef = React.createRef<HTMLDivElement>();
+
     @observable
     private values: PairsArray = _.cloneDeep(this.props.pairs);
+
+    // Track the last value length. This is used to detect manually added new rows, and
+    // manage the UX around that.
+    private lastValuesLength = this.values.length;
 
     componentDidMount() {
         disposeOnUnmount(this, reaction(
@@ -101,16 +109,39 @@ export class EditablePairs<R> extends React.Component<EditablePairsProps<R>> {
                     // this avoids reordering due to conversion elsewhere, e.g. when entering
                     // duplicate header keys in EditableHeaders.
                     this.values = _.cloneDeep(pairs);
+                    this.lastValuesLength = this.values.length;
                 }
-            }
+            },
+            { equals: comparer.structural }
         ));
+
+        disposeOnUnmount(this, autorun(() => {
+            const { keyValidation } = this.props;
+            if (!_.isFunction(keyValidation)) return;
+
+            const inputs = this.containerRef?.current?.querySelectorAll('input');
+            if (!inputs) return;
+
+            this.values.forEach((pair, i) => {
+                const keyInput = inputs?.[i * 2];
+                const validationResult = keyValidation(pair.key);
+
+                if (validationResult === true) {
+                    keyInput.setCustomValidity('');
+                    keyInput.reportValidity();
+                } else {
+                    keyInput.setCustomValidity(validationResult);
+                    keyInput.reportValidity();
+                }
+            });
+        }));
     }
 
     private convert = (pairs: PairsArray): R => {
         if (this.props.convertResult) {
             return this.props.convertResult(pairs);
         } else {
-            return pairs as unknown as R;
+            return _.cloneDeep(pairs) as unknown as R;
         }
     };
 
@@ -123,21 +154,44 @@ export class EditablePairs<R> extends React.Component<EditablePairsProps<R>> {
             this.values = pairs;
         }
 
+        // If we've just manually added a new row, make sure the parent scrolls
+        // to show it (note we ignore this for external updates).
+        const addedNewRow = this.values.length === this.lastValuesLength + 1;
+        this.lastValuesLength = this.values.length;
+        if (addedNewRow) {
+            requestAnimationFrame(() => {
+                const container = this.containerRef.current;
+                const lastInput = container?.querySelector<HTMLElement>('input:last-child');
+                lastInput?.scrollIntoView({
+                    block: 'nearest',
+                    behavior: 'smooth'
+                });
+            });
+        }
+
         onChange(convert(this.values));
     };
 
     render() {
         const {
+            className,
             keyTitle,
-            keyPattern,
+            keyValidation,
             keyPlaceholder,
             valuePlaceholder,
             allowEmptyValues
         } = this.props;
 
-        const { values, onChangeValues } = this;
+        const { values, onChangeValues, containerRef } = this;
 
-        return <EditablePairsContainer>
+        const keyPattern = typeof keyValidation === 'string'
+            ? keyValidation
+            : undefined;
+
+        return <EditablePairsContainer
+            className={className}
+            ref={containerRef}
+        >
             { _.flatMap(values, ({ key, value, disabled }, i) => [
                 <TextInput
                     value={key}
@@ -172,7 +226,6 @@ export class EditablePairs<R> extends React.Component<EditablePairsProps<R>> {
                         values.splice(i, 1);
                         onChangeValues(values);
                     })}
-                    onKeyPress={clickOnEnter}
                 >
                     <Icon icon={['far', 'trash-alt']} />
                 </PairDeleteButton>

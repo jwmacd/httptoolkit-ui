@@ -1,13 +1,17 @@
 import * as _ from "lodash";
 import * as React from "react";
 import { observer } from "mobx-react";
-import { observable, action } from "mobx";
-
+import { observable, action, computed } from "mobx";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 
+import type { SKU, SubscriptionPlans } from "@httptoolkit/accounts";
+
 import { styled, css } from "../../styles";
-import { SubscriptionPlanCode, SubscriptionPlan } from "../../model/account/subscriptions";
+import { Icon } from "../../icons";
+import { ObservablePromise } from "../../util/observable";
+
 import { Button, UnstyledButton, ButtonLink, SecondaryButton } from "../common/inputs";
+import { ModalButton } from "./modal-overlay";
 
 const PlanPickerModal = styled.dialog`
     position: absolute;
@@ -20,7 +24,7 @@ const PlanPickerModal = styled.dialog`
     right: auto;
 
     transform: translate(-50%, -50%);
-    z-index: 99;
+    z-index: 9999;
 
     display: flex;
     flex-direction: row;
@@ -28,6 +32,10 @@ const PlanPickerModal = styled.dialog`
 
     background-color: transparent;
     border: none;
+
+    min-width: 850px;
+    max-width: 980px;
+    width: 90%;
 `;
 
 const PlanPickerDetails = styled.section`
@@ -84,7 +92,7 @@ const PlanCycle = styled.span<{selected: boolean}>`
     ${p => p.selected && css`
         background-color: ${p => p.theme.mainBackground};
         border-bottom: 3px solid ${p => p.theme.containerBorder};
-        box-shadow: 0 4px 10px 0 rgba(0,0,0,0.1);
+        box-shadow: 0 4px 10px 0 rgba(0,0,0,${p => p.theme.boxShadowAlpha/2});
     `}
 
     ${p => !p.selected && css`
@@ -109,6 +117,8 @@ const PlanPickerButtons = styled.div`
 `;
 
 const PlanSecondaryButton = styled(SecondaryButton)`
+    letter-spacing: -0.5px;
+
     &:not(:last-child) {
         margin-bottom: 10px;
     }
@@ -134,7 +144,7 @@ const PricingTable = styled.div`
 const PricingTier = styled.section<{ highlighted?: boolean }>`
     display: flex;
     flex-direction: column;
-    box-shadow: 0 4px 10px 0 rgba(0,0,0,0.1);
+    box-shadow: 0 4px 10px 0 rgba(0,0,0,${p => p.theme.boxShadowAlpha/2});
     border-radius: 4px;
     border: 1px solid ${p => p.theme.containerBorder};
 
@@ -162,7 +172,7 @@ const PricingTier = styled.section<{ highlighted?: boolean }>`
     `}
 `;
 
-const TierHeader = styled.div`
+const TierHeader = styled.h2`
     width: 100%;
     padding: 30px 0;
     color: ${p => p.theme.popColor};
@@ -266,12 +276,40 @@ const PlanSmallPrint = styled.div`
     }
 `;
 
+const SpinnerModal = styled.div`
+    position: absolute;
+
+    top: 50%;
+    left: 50%;
+
+    transform: translate(-50%, -50%) scale(2);
+    z-index: 99;
+
+    display: flex;
+    flex-direction: column;
+    text-align: center;
+
+    > p {
+        max-width: 500px;
+        line-height: 1.2;
+    }
+
+    > p, > svg {
+        color: ${p => p.theme.mainBackground};
+        margin: 20px auto;
+    }
+
+    a[href] {
+        color: #6e8ff4;
+    }
+`;
+
 type PlanCycle = 'monthly' | 'annual';
 
 interface PlanPickerProps {
     email?: string;
-    plans: _.Dictionary<SubscriptionPlan>;
-    onPlanPicked: (plan: SubscriptionPlanCode | undefined) => void;
+    plans: ObservablePromise<SubscriptionPlans>;
+    onPlanPicked: (sku: SKU | undefined) => void;
     logOut: () => void;
     logIn: () => void;
 }
@@ -283,8 +321,36 @@ export class PlanPicker extends React.Component<PlanPickerProps> {
     planCycle: PlanCycle = 'monthly';
 
     render() {
-        const { planCycle, toggleCycle, buyPlan, closePicker, getPlanMonthlyPrice } = this;
+        const {
+            isPricingAvailable,
+            planCycle,
+            toggleCycle,
+            buyPlan,
+            closePicker,
+            getPlanMonthlyPrice
+        } = this;
         const { email, logOut, logIn } = this.props;
+
+        if (!isPricingAvailable) {
+            return <SpinnerModal>
+                <p>
+                    Unable to connect to HTTP Toolkit account servers...
+                </p>
+                <p>
+                    Having problems? Open an issue <a
+                        href="https://github.com/httptoolkit/httptoolkit/issues/new/choose"
+                    >on GitHub</a> or email <strong>billing@httptoolkit.com</strong> to ask for help.
+                </p>
+                <Icon
+                    icon={['fac', 'spinner-arc']}
+                    spin
+                    size='10x'
+                />
+                <ModalButton onClick={closePicker}>
+                    Cancel
+                </ModalButton>
+            </SpinnerModal>
+        }
 
         return <PlanPickerModal open>
             <PlanPickerDetails>
@@ -300,12 +366,12 @@ export class PlanPicker extends React.Component<PlanPickerProps> {
                 <PlanSmallPrint>
                     <p>
                         <strong>Cancel in two clicks, anytime</strong>. <br/>Have questions? <strong><a
-                            href="https://httptoolkit.tech/docs/guides/subscription-faq"
-                        >Read the FAQ</a></strong> or email billing@httptoolkit.tech.
+                            href="https://httptoolkit.com/docs/guides/subscription-faq"
+                        >Read the FAQ</a></strong> or email billing@httptoolkit.com.
                     </p>
                     <p>
                         By subscribing to a paid plan, you accept <Nowrap>
-                            <a href="https://httptoolkit.tech/terms-of-service">
+                            <a href="https://httptoolkit.com/terms-of-service">
                                 the HTTP Toolkit Terms of Service
                             </a>
                         </Nowrap>.
@@ -341,14 +407,15 @@ export class PlanPicker extends React.Component<PlanPickerProps> {
                     </TierPriceBlock>
                     <TierFeatures>
                         <Feature>
-                            <strong>Automated HTTP mocking & rewriting</strong>, including traffic redirection, mock responses, and errors & timeouts.
+                            <strong>Automated HTTP rewriting rules</strong>, including traffic
+                            redirection, mock responses, and errors & timeouts.
                         </Feature>
                         <Feature>
-                            <strong>Reusable mock rules</strong>. Persistent by default, plus
-                            import/export so you can store, reuse & share them later.
+                            <strong>Reusable Modify & Send tools</strong>. Persistent by default, plus
+                            import/export so you can store, reuse & share your rules & requests.
                         </Feature>
                         <Feature>
-                            <strong>Import/export for collected traffic</strong>, as either <a
+                            <strong>Import/export for all traffic</strong> as <a
                                 href="https://en.wikipedia.org/wiki/HAR_(file_format)"
                                 target="_blank"
                                 rel="noopener noreferrer"
@@ -357,18 +424,23 @@ export class PlanPicker extends React.Component<PlanPickerProps> {
                             </a> or ready-to-use code for 20+ tools.
                         </Feature>
                         <Feature>
-                            <strong>Advanced HTTP debugging & inspection tools</strong>, including compression & caching performance analysis.
+                            <strong>Advanced HTTP debugging tools</strong> including compression
+                            & caching analysis, and 'resend' functionality.
                         </Feature>
                         <Feature>
-                            <strong>Validation & documentation for 1400+ APIs</strong>,
-                            from AWS to GitHub to Stripe, powered by OpenAPI.
+                            <strong>Validation &amp; API documentation for 2600+ built-in APIs</strong>,
+                            from AWS to GitHub to Stripe, plus your own custom <a
+                                href="https://swagger.io/docs/specification/about/"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                            >OpenAPI</a> specs.
                         </Feature>
                         <Feature>
                             <strong>Advanced customization</strong>, including UI themes,
                             whitelisted & client certificates, ports, and upstream proxies.
                         </Feature>
                         <Feature>
-                            <strong>Support ongoing development!</strong>
+                            <strong>Support open-source development!</strong>
                         </Feature>
                     </TierFeatures>
                     <PricingCTA>
@@ -416,7 +488,7 @@ export class PlanPicker extends React.Component<PlanPickerProps> {
                         </SubFeatures>
                     </TierFeatures>
                     <PricingCTA>
-                        <ButtonLink href='https://httptoolkit.tech/contact'>
+                        <ButtonLink href='https://httptoolkit.com/contact'>
                             Get in touch
                         </ButtonLink>
                     </PricingCTA>
@@ -430,18 +502,28 @@ export class PlanPicker extends React.Component<PlanPickerProps> {
         this.planCycle = this.planCycle === 'annual' ? 'monthly' : 'annual';
     }
 
+    @computed
+    get isPricingAvailable() {
+        const plans = this.props.plans;
+        return plans.state === 'fulfilled';
+    }
+
     getPlanMonthlyPrice = (tierCode: string): string => {
-        const planCode = this.getPlanCode(tierCode);
-        const plan = this.props.plans[planCode];
+        if (!this.isPricingAvailable) throw new Error("Can't query prices if pricing is not available");
+        const plans = this.props.plans.value as SubscriptionPlans; // Always true once pricing is available
+
+        const sku = this.getSKU(tierCode);
+        const plan = plans[sku];
+        if (plan.prices === 'priceless') throw new Error("Can't show price for non-priced plan");
         return plan.prices!.monthly;
     };
 
-    getPlanCode = (tierCode: string) => {
-        return `${tierCode}-${this.planCycle}` as SubscriptionPlanCode;
+    getSKU = (tierCode: string) => {
+        return `${tierCode}-${this.planCycle}` as SKU;
     }
 
     buyPlan = (tierCode: string) => {
-        this.props.onPlanPicked(this.getPlanCode(tierCode));
+        this.props.onPlanPicked(this.getSKU(tierCode));
     }
 
     closePicker = () => {

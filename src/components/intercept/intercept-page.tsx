@@ -5,7 +5,7 @@ import { observable, action } from 'mobx';
 import { observer, inject } from 'mobx-react';
 
 import { WithInjected } from '../../types';
-import { styled } from '../../styles';
+import { NARROW_LAYOUT_BREAKPOINT, styled } from '../../styles';
 
 import { InterceptorStore } from '../../model/interception/interceptor-store';
 import { EventsStore } from '../../model/events/events-store';
@@ -13,7 +13,8 @@ import { MANUAL_INTERCEPT_ID } from '../../model/interception/interceptors';
 
 import { ConnectedSources } from './connected-sources';
 import { InterceptOption } from './intercept-option';
-import { SearchBox } from '../common/search-box';
+import { TextInput } from '../common/inputs';
+import { IconButton } from '../common/icon-button';
 
 interface InterceptPageProps {
     className?: string;
@@ -25,26 +26,47 @@ interface InterceptPageProps {
 const InterceptPageContainer = styled.section`
     display: grid;
 
-    grid-gap: 60px;
-    grid-template-columns: 1fr 1fr 1fr 1fr;
-    grid-template-rows: 310px;
-    grid-auto-rows: minmax(200px, auto);
+    @media (min-width: ${NARROW_LAYOUT_BREAKPOINT}px) {
+        grid-gap: 40px;
+        grid-template-columns: 1fr 1fr 1fr 1fr;
+        grid-template-rows: 320px;
+        padding: 60px 40px;
+    }
+
+    @media not (min-width: ${NARROW_LAYOUT_BREAKPOINT}px) {
+        grid-gap: 20px;
+        grid-template-columns: 1fr 1fr 1fr;
+        padding: 40px;
+    }
+
+    grid-auto-rows: minmax(210px, auto);
     grid-auto-flow: row dense;
 
     max-width: 1200px;
     margin: 0 auto 20px;
-    padding: 60px 40px;
 
     > ${ConnectedSources} {
+        @media not (min-width: ${NARROW_LAYOUT_BREAKPOINT}px) {
+            display: none;
+        }
+
         order: -1;
         grid-column: 3 / span 2;
         overflow-y: auto;
+        margin-bottom: 0;
     }
 `;
 
 const InterceptInstructions = styled.div`
     order: -1;
-    grid-column: 1 / span 2;
+
+    @media (min-width: ${NARROW_LAYOUT_BREAKPOINT}px) {
+        grid-column: 1 / span 2;
+    }
+
+    @media not (min-width: ${NARROW_LAYOUT_BREAKPOINT}px) {
+        grid-column: 1 / -1;
+    }
 
     display: flex;
     flex-direction: column;
@@ -65,12 +87,53 @@ const InterceptInstructions = styled.div`
     }
 `;
 
-const InterceptSearchBox = styled(SearchBox).attrs(() => ({
-    autoFocus: true,
-    placeholder: 'Browsers, mobile, docker...',
-    iconSize: '2x'
-}))`
-    margin: 20px 0 0;
+const SearchInput = styled(TextInput)`
+    width: 100%;
+    padding: 15px;
+    box-sizing: border-box;
+
+    box-shadow: inset 0 2px 4px 1px rgba(0, 0, 0, ${p => p.theme.boxShadowAlpha / 2});
+
+    font-size: ${p => p.theme.headingSize};
+`;
+
+const ClearSearchButton = styled(IconButton)`
+    position: absolute;
+
+    right: 15px;
+    top: 50%;
+    transform: translateY(-50%);
+    cursor: pointer;
+`;
+
+const SearchBox = styled((props: {
+    className?: string,
+    value: string,
+    onSearch: (input: string) => void
+}) =>
+    <div className={props.className}>
+        <SearchInput
+            autoFocus={true}
+            value={props.value}
+            placeholder='Browsers, mobile, docker...'
+            aria-label='Filter the list of intercept options below'
+            onChange={(e) => props.onSearch(e.currentTarget.value)}
+        />
+        { !!props.value &&
+            <ClearSearchButton
+                icon={['fas', 'times']}
+                iconSize={'2x'}
+                onClick={() => props.onSearch('')}
+                title='Clear search input'
+            />
+        }
+    </div>
+)`
+    position: relative;
+
+    @media (min-width: ${NARROW_LAYOUT_BREAKPOINT}px) {
+        margin: 20px 0 0;
+    }
 `;
 
 @inject('interceptorStore')
@@ -114,7 +177,7 @@ class InterceptPage extends React.Component<InterceptPageProps> {
                         Click an option below to connect a traffic source, or
                         search for connectors that could work for you:
                     </p>
-                    <InterceptSearchBox
+                    <SearchBox
                         value={this.filter || ''}
                         onSearch={this.onSearchInput}
                     />

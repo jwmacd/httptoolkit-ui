@@ -13,7 +13,8 @@ import {
     MockttpPluggableAdmin,
     ProxySetting,
     RequestRuleData,
-    WebSocketRuleData
+    WebSocketRuleData,
+    MockttpHttpsOptions
 } from 'mockttp';
 import * as MockRTC from 'mockrtc';
 
@@ -31,7 +32,7 @@ import {
 import { AccountStore } from './account/account-store';
 
 import { delay } from '../util/promise';
-import { reportError } from '../errors';
+import { logError } from '../errors';
 import { lazyObservablePromise } from '../util/observable';
 import { persist, hydrate } from '../util/mobx-persist/persist';
 import { isValidPort } from './network';
@@ -154,6 +155,7 @@ export class ProxyStore {
             if (!accountStore.isPaidUser) {
                 this.setPortConfig(undefined);
                 this.http2Enabled = 'fallback';
+                this.tlsPassthroughConfig = [];
             }
         });
 
@@ -162,23 +164,6 @@ export class ProxyStore {
             key: 'server-store',
             store: this
         });
-
-        // Backward compat for store data before 2020-01-28 - drop this in a month or two
-        const rawData = localStorage.getItem('interception-store');
-        if (rawData) {
-            try {
-                const data = JSON.parse(rawData);
-
-                // Migrate data from the interception store to here:
-                if (data._portConfig) {
-                    runInAction(() => {
-                        this._portConfig = data._portConfig;
-                    });
-                }
-            } catch (e) {
-                console.log(e);
-            }
-        }
 
         console.log('Proxy settings loaded');
     }
@@ -192,6 +177,7 @@ export class ProxyStore {
         });
 
         this._http2CurrentlyEnabled = this.http2Enabled;
+        this._currentTlsPassthroughConfig = _.cloneDeep(this.tlsPassthroughConfig);
 
         this.monitorRemoteClientConnection(this.adminClient);
 
@@ -201,7 +187,10 @@ export class ProxyStore {
                     cors: false,
                     suggestChanges: false,
                     // User configurable settings:
-                    http2: this.http2Enabled,
+                    http2: this._http2CurrentlyEnabled,
+                    https: {
+                        tlsPassthrough: this._currentTlsPassthroughConfig
+                    } as MockttpHttpsOptions // Cert/Key options are set by the server
                 },
                 port: this.portConfig
             },
@@ -237,14 +226,14 @@ export class ProxyStore {
     private monitorRemoteClientConnection(client: PluggableAdmin.AdminClient<{}>) {
         client.on('admin-client:stream-error', (err) => {
             console.log('Admin client stream error');
-            reportError(err.message ? err : new Error('Client stream error'), { cause: err });
+            logError(err.message ? err : new Error('Client stream error'), { cause: err });
         });
         client.on('admin-client:subscription-error', (err) => {
             console.log('Admin client subscription error');
-            reportError(err.message ? err : new Error('Client subscription error'), { cause: err });
+            logError(err.message ? err : new Error('Client subscription error'), { cause: err });
         });
         client.on('admin-client:stream-reconnect-failed', (err) => {
-            reportError(err.message ? err : new Error('Client reconnect error'), { cause: err });
+            logError(err.message ? err : new Error('Client reconnect error'), { cause: err });
         });
     }
 
@@ -277,6 +266,13 @@ export class ProxyStore {
     private _http2CurrentlyEnabled = this.http2Enabled;
     get http2CurrentlyEnabled() {
         return this._http2CurrentlyEnabled;
+    }
+
+    @persist('list') @observable
+    tlsPassthroughConfig: Array<{ hostname: string }> = [];
+    private _currentTlsPassthroughConfig: Array<{ hostname: string }> = [];
+    get currentTlsPassthroughConfig() {
+        return this._currentTlsPassthroughConfig;
     }
 
     setRequestRules = (...rules: RequestRuleData[]) => {

@@ -1,28 +1,27 @@
 import * as _ from 'lodash';
 import * as React from 'react';
 import { observer, inject } from "mobx-react";
-import { action, computed } from 'mobx';
 import * as dedent from 'dedent';
 import {
-    distanceInWordsStrict, format
+    distanceInWordsStrict, distanceInWordsToNow, format
 } from 'date-fns';
-import { get } from 'typesafe-get';
+import { SubscriptionPlans } from '@httptoolkit/accounts';
 
 import { WithInjected } from '../../types';
 import { styled, Theme, ThemeName } from '../../styles';
-import { WarningIcon } from '../../icons';
+import { Icon, WarningIcon } from '../../icons';
 
 import { AccountStore } from '../../model/account/account-store';
-import { UiStore } from '../../model/ui-store';
+import { UiStore } from '../../model/ui/ui-store';
 import { serverVersion, versionSatisfies, PORT_RANGE_SERVER_RANGE } from '../../services/service-versions';
 
 import { CollapsibleCard, CollapsibleCardHeading } from '../common/card';
 import { ContentLabel, ContentValue } from '../common/text-content';
 import { Button } from '../common/inputs';
 import { TabbedOptionsContainer, Tab, TabsContainer } from '../common/tabbed-options';
-import { BaseEditor } from '../editor/base-editor';
+import { ContainerSizedEditor } from '../editor/base-editor';
 
-import * as amIUsingHtml from '../../amiusing.html';
+import amIUsingHtml from '../../amiusing.html';
 
 import { ProxySettingsCard } from './proxy-settings-card';
 import { ConnectionSettingsCard } from './connection-settings-card';
@@ -60,6 +59,7 @@ const SettingPageContainer = styled.section`
 
 const SettingsHeading = styled.h1`
     font-size: ${p => p.theme.loudHeadingSize};
+    font-family: ${p => p.theme.titleTextFamily};
     font-weight: bold;
     margin-bottom: 40px;
 `;
@@ -72,8 +72,11 @@ const AccountDetailsContainer = styled.div`
 
 const AccountControls = styled.div`
     margin-top: 30px;
+
     display: flex;
     flex-direction: row;
+    flex-wrap: wrap;
+    gap: 10px;
 `;
 
 const AccountContactFooter = styled.div`
@@ -88,7 +91,7 @@ const ThemeColors = styled.div`
     display: grid;
     grid-template-columns: 1fr 1fr;
     border: 3px solid #999;
-    margin: 0 20px;
+    margin: auto 20px;
 `;
 
 const ThemeColorBlock = styled.div<{ themeColor: keyof Theme }>`
@@ -101,6 +104,14 @@ const EditorContainer = styled.div`
     border: 3px solid #999;
     height: 300px;
     flex-grow: 1;
+    margin: auto 0;
+`;
+
+const AccountUpdateSpinner = styled(Icon).attrs(() => ({
+    icon: ['fas', 'spinner'],
+    spin: true
+}))`
+    margin: 0 0 0 10px;
 `;
 
 @inject('accountStore')
@@ -116,7 +127,9 @@ class SettingsPage extends React.Component<SettingsPageProps> {
             userEmail,
             userSubscription,
             subscriptionPlans,
+            isAccountUpdateInProcess,
             getPro,
+            canManageSubscription,
             logOut
         } = this.props.accountStore;
 
@@ -169,13 +182,22 @@ class SettingsPage extends React.Component<SettingsPageProps> {
                                     'deleted': 'Cancelled'
                                 }[sub.status]) || 'Unknown'
                             }
+                            { isAccountUpdateInProcess &&
+                                <AccountUpdateSpinner />
+                            }
                         </ContentValue>
 
                         <ContentLabel>
                             Subscription plan
                         </ContentLabel>
                         <ContentValue>
-                            { get(subscriptionPlans, sub.plan, 'name') || 'Unknown' }
+                            {
+                                subscriptionPlans.state === 'fulfilled'
+                                ? (subscriptionPlans.value as SubscriptionPlans)[sub.sku]?.name
+                                // If the accounts API is unavailable for plan metadata for some reason, we can just
+                                // format the raw SKU to get something workable, no worries:
+                                : _.startCase(sub.sku)
+                            }
                         </ContentValue>
 
                         <ContentLabel>
@@ -191,7 +213,8 @@ class SettingsPage extends React.Component<SettingsPageProps> {
                         <ContentValue>
                             {
                                 distanceInWordsStrict(new Date(), sub.expiry, {
-                                    addSuffix: true
+                                    addSuffix: true,
+                                    partialMethod: 'round'
                                 })
                             } ({
                                 format(sub.expiry.toString(), 'Do [of] MMMM YYYY')
@@ -209,38 +232,37 @@ class SettingsPage extends React.Component<SettingsPageProps> {
                                 View latest invoice
                             </SettingsButtonLink>
                         }
-                        { sub.status !== 'deleted' &&
-                          sub.updateBillingDetailsUrl &&
-                            <SettingsButtonLink
-                                href={ sub.updateBillingDetailsUrl }
-                                target='_blank'
-                                rel='noreferrer noopener'
-                                highlight={sub.status === 'past_due'}
-                            >
-                                Update billing details
-                            </SettingsButtonLink>
-                        }
-                        { sub.status !== 'deleted' &&
-                          sub.cancelSubscriptionUrl &&
-                            <SettingsButtonLink
-                                href={ sub.cancelSubscriptionUrl }
-                                target='_blank'
-                                rel='noreferrer noopener'
+                        { canManageSubscription && <>
+                            { sub.updateBillingDetailsUrl &&
+                                <SettingsButtonLink
+                                    href={sub.updateBillingDetailsUrl}
+                                    target='_blank'
+                                    rel='noreferrer noopener'
+                                    highlight={sub.status === 'past_due'}
+                                >
+                                    Update billing details
+                                </SettingsButtonLink>
+                            }
+                            <SettingsButton
+                                onClick={this.confirmSubscriptionCancellation}
+                                disabled={isAccountUpdateInProcess}
                             >
                                 Cancel subscription
-                            </SettingsButtonLink>
-                        }
+                                { isAccountUpdateInProcess &&
+                                    <AccountUpdateSpinner />
+                                }
+                            </SettingsButton>
+                        </> }
                         <SettingsButton onClick={logOut}>Log out</SettingsButton>
                     </AccountControls>
 
                     <AccountContactFooter>
-                        Questions? Email <strong>billing@httptoolkit.tech</strong>
+                        Questions? Email <strong>billing@httptoolkit.com</strong>
                     </AccountContactFooter>
                 </CollapsibleCard>
 
-
                 {/*
-                    This above shows for both active paid users, and recently paid users whose most recent
+                    The above shows for both active paid users, and recently paid users whose most recent
                     payments failed. For those users, we drop other Pro features, but keep the settings
                     UI so they can easily log out, update billing details or cancel fully.
 
@@ -256,10 +278,7 @@ class SettingsPage extends React.Component<SettingsPageProps> {
                         </>
                     }
 
-                    {
-                        this.props.accountStore!.featureFlags.includes('openapi') &&
-                        <ApiSettingsCard {...cardProps.api} />
-                    }
+                    <ApiSettingsCard {...cardProps.api} />
 
                     <CollapsibleCard {...cardProps.themes}>
                         <header>
@@ -271,15 +290,21 @@ class SettingsPage extends React.Component<SettingsPageProps> {
                         </header>
                         <TabbedOptionsContainer>
                             <TabsContainer
-                                onClick={(value: ThemeName | Theme) => uiStore.setTheme(value)}
-                                isSelected={(value: ThemeName | Theme) => {
+                                onClick={(value: ThemeName | 'automatic' | Theme) => uiStore.setTheme(value)}
+                                isSelected={(value: ThemeName | 'automatic' | Theme) => {
                                     if (typeof value === 'string') {
-                                        return uiStore.themeName === value
+                                        return uiStore.themeName === value;
                                     } else {
                                         return _.isEqual(value, uiStore.theme);
                                     }
                                 }}
                             >
+                                <Tab
+                                    icon={['fas', 'magic']}
+                                    value='automatic'
+                                >
+                                    Automatic
+                                </Tab>
                                 <Tab
                                     icon={['fas', 'sun']}
                                     value='light'
@@ -294,7 +319,7 @@ class SettingsPage extends React.Component<SettingsPageProps> {
                                 </Tab>
                                 <Tab
                                     icon={['fas', 'adjust']}
-                                    value={'high-contrast'}
+                                    value='high-contrast'
                                 >
                                     High Contrast
                                 </Tab>
@@ -313,10 +338,9 @@ class SettingsPage extends React.Component<SettingsPageProps> {
                             </ThemeColors>
 
                             <EditorContainer>
-                                <BaseEditor
+                                <ContainerSizedEditor
                                     contentId={null}
                                     language='html'
-                                    theme={uiStore.theme.monacoTheme}
                                     defaultValue={amIUsingHtml}
                                 />
                             </EditorContainer>
@@ -326,6 +350,39 @@ class SettingsPage extends React.Component<SettingsPageProps> {
             </SettingPageContainer>
         </SettingsPageScrollContainer>;
     }
+
+    confirmSubscriptionCancellation = () => {
+        const subscription = this.props.accountStore.userSubscription;
+        if (!subscription) {
+            throw new Error("Can't cancel without a subscription");
+        }
+
+        const planName = SubscriptionPlans[subscription.sku].name;
+
+        let cancelEffect: string;
+
+        if (subscription.status === 'active') {
+            cancelEffect = `It will remain usable until it expires in ${
+                distanceInWordsToNow(subscription.expiry)
+            } but will not renew.`;
+        } else if (subscription.status === 'past_due') {
+            cancelEffect = 'No more renewals will be attempted and it will deactivate immediately.';
+        } else {
+            throw new Error(`Cannot cancel subscription with status ${subscription.status}`);
+        }
+
+        const confirmed = confirm([
+            `This will cancel your HTTP Toolkit ${planName} subscription.`,
+            cancelEffect,
+            "Are you sure?"
+        ].join('\n\n'));
+
+        if (!confirmed) return;
+
+        this.props.accountStore.cancelSubscription().catch((e) => {
+            alert(e.message);
+        });
+    };
 }
 
 // Annoying cast required to handle the store prop nicely in our types

@@ -3,9 +3,10 @@ import * as React from 'react';
 import { disposeOnUnmount, inject, observer } from 'mobx-react';
 import { action, computed, observable } from 'mobx';
 import { trackUndo } from 'mobx-shallow-undo';
+import * as polished from 'polished';
 
-import { styled } from '../../../styles';
-import { isCmdCtrlPressed } from '../../../util/ui';
+import { css, styled } from '../../../styles';
+import { copyToClipboard, isCmdCtrlPressed } from '../../../util/ui';
 
 import {
     Filter,
@@ -19,10 +20,10 @@ import {
     buildCustomFilter,
     CustomFilterClass
 } from '../../../model/filters/filter-matching';
-import { UiStore } from '../../../model/ui-store';
+import { UiStore } from '../../../model/ui/ui-store';
 import { AccountStore } from '../../../model/account/account-store';
 
-import { IconButton } from '../../common/icon-button';
+import { IconButton, IconButtonLink } from '../../common/icon-button';
 import { FilterTag } from './filter-tag';
 import { FilterInput } from './filter-input';
 
@@ -42,14 +43,40 @@ const SearchFilterBox = styled.div<{ hasContents: boolean }>`
     border-radius: 4px;
 
     border: 1px solid ${p => p.theme.containerBorder};
-    box-shadow: inset 0 2px 4px 1px rgba(0, 0, 0, 0.1);
-    background-color: ${p => p.theme.highlightBackground};
+    box-shadow: inset 0 2px 4px 1px rgba(0, 0, 0, ${p => p.theme.boxShadowAlpha / 2});
+    background-color: ${p => p.theme.inputBackground};
     color: ${p => p.theme.highlightColor};
 
     font-size: ${p => p.theme.textSize};
 
     display: flex;
-    flex-wrap: wrap;
+
+    &:hover, &:focus-within {
+        flex-wrap: wrap;
+    }
+    &:not(:hover):not(:focus-within) {
+        overflow: hidden;
+    }
+
+    /* Add a layer to act as a button background over non-wrapping content */
+    &:after {
+        content: "";
+        position: absolute;
+        display: block;
+
+        z-index: 5;
+
+        top: 4px;
+        bottom: 4px;
+
+        right: 0px;
+        width: 36px;
+        background: linear-gradient(
+            to right,
+            transparent 0%,
+            ${p => polished.rgba(p.theme.inputBackground, 0.9)} 25%
+        );
+    }
 
     .react-autosuggest__container {
         flex-grow: 1;
@@ -62,15 +89,28 @@ const SearchFilterBox = styled.div<{ hasContents: boolean }>`
     }
 `;
 
-const ClearSearchButton = styled(IconButton)`
+const FloatingSearchButtonStyles = css`
     width: ${CLEAR_BUTTON_WIDTH};
     padding: 4px 10px;
     box-sizing: border-box;
+
+    /* This isn't needed for button, but is for buttonlink - unclear why but it works */
+    display: flex;
+    align-items: center;
 
     position: absolute;
     top: 0;
     right: 0;
     bottom: 0;
+
+    /* Appears in front of the :after background layer */
+    z-index: 10;
+`;
+
+const FloatingClearFiltersButton = styled(IconButton)`${FloatingSearchButtonStyles}`;
+const FloatingFilterDocsButtonLink = styled(IconButtonLink)`
+    ${FloatingSearchButtonStyles}
+    opacity: 0.8;
 `;
 
 const deleteFilter = (filters: FilterSet, filter: Filter): FilterSet => {
@@ -380,16 +420,14 @@ export class SearchFilter<T> extends React.Component<{
             activeFilters.indexOf(f),
         ['desc']);
 
-        if (filtersToCopy.length > 0 && !!navigator.clipboard) {
+        if (filtersToCopy.length > 0) {
             const serialization = filtersToCopy.map(t => t.serialize()).join(' ');
-            navigator.clipboard.writeText(serialization);
+            copyToClipboard(serialization);
             e.preventDefault();
         }
     }
 
     private onCut = (e: React.ClipboardEvent) => {
-        if (!navigator.clipboard) return;
-
         this.onCopy(e);
         this.deleteSelectedFilters();
     }
@@ -538,6 +576,7 @@ export class SearchFilter<T> extends React.Component<{
             <FilterInput
                 value={textInputValue}
                 onChange={onInputChanged}
+                label="Enter a string like 'hello' or a structured filter like hostname=google.com to filter the requests in the list"
                 placeholder={otherFilters.length === 0
                     ? placeholder
                     : '...'
@@ -555,11 +594,19 @@ export class SearchFilter<T> extends React.Component<{
                 isPaidUser={accountStore!.isPaidUser}
                 getPro={accountStore!.getPro}
             />
-            { hasContents &&
-                <ClearSearchButton
+            { hasContents
+                ? <FloatingClearFiltersButton
                     title="Clear all search filters"
                     icon={['fas', 'times']}
                     onClick={onFiltersCleared}
+                />
+                : <FloatingFilterDocsButtonLink
+                    icon={['fas', 'question']}
+                    title="Open filtering docs"
+
+                    href="https://httptoolkit.com/docs/reference/view-page/#filtering-intercepted-traffic"
+                    target='_blank'
+                    rel='noreferrer noopener'
                 />
             }
         </SearchFilterBox>;

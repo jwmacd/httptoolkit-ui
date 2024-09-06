@@ -2,6 +2,7 @@ import * as _ from 'lodash';
 import { UAParser } from 'ua-parser-js';
 import { get } from 'typesafe-get';
 
+import { popColor } from '../../styles';
 import { SourceIcons, IconProps, SourceIconName } from '../../icons';
 
 export interface TrafficSource {
@@ -117,10 +118,10 @@ const getIcon = (useragent: IUAParser.IResult) => {
 
     const uaStrings = useragent.ua.match(/[A-Za-z]+/g) || [];
 
-    const recognizedUaPart = <SourceIconName> _.find(
+    const recognizedUaPart = _.find(
         uaStrings.map((s) => _.upperFirst(s.toLowerCase())),
         (s) => isValidIconName(s)
-    );
+    ) as SourceIconName;
 
     if (recognizedUaPart) {
         return SourceIcons[recognizedUaPart];
@@ -148,6 +149,16 @@ export const UNKNOWN_SOURCE = {
     ua: '',
     summary: 'Unknown client',
     icon: SourceIcons.Unknown
+};
+
+export const MANUALLY_SENT_SOURCE = {
+    ua: '',
+    summary: 'HTTP Toolkit (Send)',
+    description: 'Sent manually from HTTP Toolkit',
+    icon: {
+        icon: 'PaperPlaneTilt',
+        color: popColor
+    }
 };
 
 export const parseSource = (userAgentHeader: string | undefined): TrafficSource => {

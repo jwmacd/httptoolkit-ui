@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.tech>
+ * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.com>
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -12,8 +12,8 @@ import * as portals from 'react-reverse-portal';
 import { AccountStore } from '../../../model/account/account-store';
 import { RTCDataChannel } from '../../../model/webrtc/rtc-data-channel';
 
-import { ExpandedPaneContentContainer } from '../view-details-pane';
-import { ThemedSelfSizedEditor } from '../../editor/base-editor';
+import { PaneOuterContainer } from '../view-details-pane';
+import { SelfSizedEditor } from '../../editor/base-editor';
 import { RTCDataChannelCard } from './rtc-data-channel-card';
 import { RTCConnectionHeader } from './rtc-connection-header';
 
@@ -22,7 +22,7 @@ import { RTCConnectionHeader } from './rtc-connection-header';
 export class RTCDataChannelDetailsPane extends React.Component<{
     dataChannel: RTCDataChannel,
 
-    streamMessageEditor: portals.HtmlPortalNode<typeof ThemedSelfSizedEditor>,
+    streamMessageEditor: portals.HtmlPortalNode<typeof SelfSizedEditor>,
     navigate: (path: string) => void,
 
     // Injected:
@@ -49,7 +49,7 @@ export class RTCDataChannelDetailsPane extends React.Component<{
             accountStore
         } = this.props;
 
-        return <ExpandedPaneContentContainer>
+        return <PaneOuterContainer>
             { !this.isConnectionHidden &&
                 <RTCConnectionHeader
                     connection={dataChannel.rtcConnection}
@@ -66,8 +66,9 @@ export class RTCDataChannelDetailsPane extends React.Component<{
                 expanded={true}
                 onExpandToggled={this.jumpToConnection}
                 onCollapseToggled={undefined} // Hide the collapse button
+                ariaLabel='RTC Data Messages Section'
             />
-        </ExpandedPaneContentContainer>;
+        </PaneOuterContainer>;
 
     }
 

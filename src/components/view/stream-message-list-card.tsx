@@ -8,15 +8,15 @@ import { styled } from '../../styles';
 import { saveFile } from '../../util/ui';
 
 import { StreamMessage } from '../../model/events/stream-message';
-import { getSummaryColour } from '../../model/events/categorization';
+import { getSummaryColor } from '../../model/events/categorization';
 
 import { Pill } from '../common/pill';
 import { IconButton } from '../common/icon-button';
 import { CollapsingButtons } from '../common/collapsing-buttons';
 import { ExpandShrinkButton } from '../common/expand-shrink-button';
-import { CollapsibleCard, CollapsibleCardHeading } from '../common/card';
+import { CollapsibleCard, CollapsibleCardHeading, ExpandableCardProps } from '../common/card';
 
-import { ThemedSelfSizedEditor } from '../editor/base-editor';
+import { SelfSizedEditor } from '../editor/base-editor';
 import {
     StreamMessageCollapsedRow,
     StreamMessageEditorRow
@@ -37,19 +37,14 @@ function getFilename(
 export type StreamType = 'WebSocket' | 'DataChannel';
 
 @observer
-export class StreamMessageListCard extends React.Component<{
-    collapsed: boolean,
-    expanded: boolean,
-    onCollapseToggled?: () => void,
-    onExpandToggled?: () => void,
-
+export class StreamMessageListCard extends React.Component<ExpandableCardProps & {
     isPaidUser: boolean,
     filenamePrefix: string,
     streamId: string,
     streamType: StreamType,
     streamLabel?: string,
     messages: Array<StreamMessage>,
-    editorNode: portals.HtmlPortalNode<typeof ThemedSelfSizedEditor>
+    editorNode: portals.HtmlPortalNode<typeof SelfSizedEditor>
 }> {
 
     @observable
@@ -71,13 +66,15 @@ export class StreamMessageListCard extends React.Component<{
             collapsed,
             expanded,
             onCollapseToggled,
-            onExpandToggled
+            onExpandToggled,
+            ariaLabel
         } = this.props;
 
         return <CollapsibleCard
             collapsed={collapsed}
             onCollapseToggled={onCollapseToggled}
             expanded={expanded}
+            ariaLabel={ariaLabel}
         >
             <header>
                 <CollapsingButtons>
@@ -97,7 +94,7 @@ export class StreamMessageListCard extends React.Component<{
                     />
                 </CollapsingButtons>
                 { streamLabel && <Pill
-                    color={getSummaryColour('data')}
+                    color={getSummaryColor('data')}
                     title={streamLabel}
                 >
                     { streamLabel }
@@ -113,7 +110,7 @@ export class StreamMessageListCard extends React.Component<{
                     { streamType } messages
                 </CollapsibleCardHeading>
             </header>
-            <StreamMessagesList expanded={expanded}>
+            <StreamMessagesList expanded={!!expanded}>
                 {
                     messages.map((message, i) =>
                         this.expandedRow === i

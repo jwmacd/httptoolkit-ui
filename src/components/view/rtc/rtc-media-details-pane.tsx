@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.tech>
+ * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.com>
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -10,7 +10,7 @@ import { observer } from 'mobx-react';
 
 import { RTCMediaTrack } from '../../../model/webrtc/rtc-media-track';
 
-import { ExpandedPaneContentContainer } from '../view-details-pane';
+import { PaneOuterContainer } from '../view-details-pane';
 import { RTCMediaCard } from './rtc-media-card';
 import { RTCConnectionHeader } from './rtc-connection-header';
 
@@ -38,7 +38,7 @@ export class RTCMediaDetailsPane extends React.Component<{
             mediaTrack
         } = this.props;
 
-        return <ExpandedPaneContentContainer>
+        return <PaneOuterContainer>
             { !this.isConnectionHidden &&
                 <RTCConnectionHeader
                     connection={mediaTrack.rtcConnection}
@@ -51,6 +51,7 @@ export class RTCMediaDetailsPane extends React.Component<{
                 expanded={true}
                 onExpandToggled={this.jumpToConnection}
                 onCollapseToggled={undefined} // Hide the collapse button
+                ariaLabel='RTC Media Stream Section'
 
                 // Link the key to the track, to ensure selected-message state gets
                 // reset when we switch between traffic:
@@ -58,7 +59,7 @@ export class RTCMediaDetailsPane extends React.Component<{
 
                 mediaTrack={mediaTrack}
             />
-        </ExpandedPaneContentContainer>;
+        </PaneOuterContainer>;
 
     }
 

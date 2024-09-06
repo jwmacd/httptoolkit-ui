@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.tech>
+ * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.com>
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -78,7 +78,7 @@ export type RTCInitialMatcher = InstanceType<typeof RTCInitialMatcherClasses[num
 export type RTCStepClass = typeof RTCStepLookup[keyof typeof RTCStepLookup];
 export type RTCStep = InstanceType<RTCStepClass>;
 
-export interface RTCMockRule {
+export interface RTCRule {
     id: string;
     type: 'webrtc';
     activated: boolean;

@@ -24,9 +24,6 @@ export const serverVersion = lazyObservablePromise(() =>
         })
 );
 
-// Notable desktop versions:
-export const DESKTOP_HEADER_LIMIT_CONFIGURABLE = "^0.1.20 || ^1.0.0";
-
 // The last known service version - immediately available (though still async),
 // but reports the previous startup version, not necessarily the latest one.
 // May be undefined if the app has never yet started successfully.
@@ -40,14 +37,28 @@ export const lastServerVersion =
         else return version;
     });
 
-export function versionSatisfies(version: string | undefined, range: string) {
-    return version !== undefined &&
+export function versionSatisfies(version: string | Error | undefined, range: string) {
+    return (typeof version === 'string') &&
         semver.satisfies(version, range, { includePrerelease: true });
 }
 
+// A quick way to check server support synchronously
+export function serverSupports(versionRequirement: string | undefined) {
+    if (!versionRequirement || versionRequirement === '*') return true;
+
+    // If we haven't got the server version yet, assume anything specific is unsupported
+    if (serverVersion.state !== 'fulfilled') return false;
+
+    const version = serverVersion.value as string; // Fulfilled -> string value
+    return versionSatisfies(version, versionRequirement);
+}
+
+// Notable desktop versions:
+export const DESKTOP_HEADER_LIMIT_CONFIGURABLE = "^0.1.20 || ^1.0.0";
+
 // Notable server versions:
 export const PORT_RANGE_SERVER_RANGE = '^0.1.14 || ^1.0.0';
-export const MOCK_SERVER_RANGE = '^0.1.21 || ^1.0.0';
+export const MODIFY_RULE_SERVER_RANGE = '^0.1.21 || ^1.0.0';
 export const HOST_MATCHER_SERVER_RANGE = '^0.1.22 || ^1.0.0';
 export const CLIENT_CERT_SERVER_RANGE = '^0.1.26 || ^1.0.0';
 export const FROM_FILE_HANDLER_SERVER_RANGE = '^0.1.28 || ^1.0.0';
@@ -69,3 +80,8 @@ export const WEBSOCKET_MESSAGING_RULES_SUPPORTED = '^1.9.0';
 export const WEBRTC_GLOBALLY_ENABLED = '^1.10.3';
 export const JSONRPC_RESPONSE_RULE_SUPPORTED = '^1.11.0';
 export const RTC_RULES_SUPPORTED = '^1.11.0';
+export const TLS_PASSTHROUGH_SUPPORTED = '^1.12.0';
+export const CONNECTION_RESET_SUPPORTED = '^1.12.0';
+export const SERVER_REST_API_SUPPORTED = '^1.13.0';
+export const SERVER_SEND_API_SUPPORTED = '^1.13.0';
+export const ADVANCED_PATCH_TRANSFORMS = '^1.18.0';

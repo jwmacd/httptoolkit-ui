@@ -6,9 +6,9 @@ import {
     HtkResponse,
     Headers,
     MessageBody,
-    InputInitiatedRequest,
     InputRequest,
     InputResponse,
+    InputFailedRequest,
     TimingEvents,
     InputMessage,
     MockttpBreakpointedRequest,
@@ -19,23 +19,29 @@ import {
 import {
     fakeBuffer,
     FakeBuffer,
-    asHeaderArray,
-    lastHeader,
-} from '../../util';
+    stringToBuffer,
+} from '../../util/buffer';
 import { UnreachableCheck } from '../../util/error';
 import { lazyObservablePromise, ObservablePromise, observablePromise } from "../../util/observable";
+import {
+    asHeaderArray,
+    lastHeader
+} from '../../util/headers';
 
-import { reportError } from '../../errors';
+import { logError } from '../../errors';
 
-import { parseSource } from './sources';
+import { MANUALLY_SENT_SOURCE, parseSource } from './sources';
 import { getContentType } from '../events/content-types';
 import { HTKEventBase } from '../events/event-base';
+
+import { HandlerClassKey, HtkRule, getRulePartKey } from '../rules/rules';
 
 import { ApiStore } from '../api/api-store';
 import { ApiExchange } from '../api/api-interfaces';
 import { OpenApiExchange } from '../api/openapi';
 import { parseRpcApiExchange } from '../api/jsonrpc';
 import { ApiMetadata } from '../api/api-interfaces';
+
 import { decodeBody } from '../../services/ui-worker-api';
 import {
     RequestBreakpoint,
@@ -76,7 +82,9 @@ function addRequestMetadata(request: InputRequest): HtkRequest {
     try {
         return Object.assign(request, {
             parsedUrl: tryParseUrl(request) || getFallbackUrl(request),
-            source: parseSource(request.headers['user-agent']),
+            source: request.tags.includes('httptoolkit:manually-sent-request')
+                ? MANUALLY_SENT_SOURCE
+                : parseSource(request.headers['user-agent']),
             body: new HttpBody(request, request.headers),
             contentType: getContentType(lastHeader(request.headers['content-type'])) || 'text',
             cache: observable.map(new Map<symbol, unknown>(), { deep: false })
@@ -105,7 +113,7 @@ export class HttpBody implements MessageBody {
         headers: Headers
     ) {
         if (!('body' in message) || !message.body) {
-            this._encoded = Buffer.from("");
+            this._encoded = stringToBuffer("");
         } else if ('buffer' in message.body) {
             this._encoded = message.body.buffer;
         } else {
@@ -124,6 +132,9 @@ export class HttpBody implements MessageBody {
 
     private _decoded: Buffer | undefined;
 
+    @observable
+    decodingError: Error | undefined;
+
     decodedPromise: ObservablePromise<Buffer | undefined> = lazyObservablePromise(async () => {
         // Exactly one of _encoded & _decoded is a buffer, never neither/both.
         if (this._decoded) return this._decoded;
@@ -137,8 +148,17 @@ export class HttpBody implements MessageBody {
             const { decoded, encoded } = await decodeBody(encodedBuffer, this._contentEncoding);
             this._encoded = encoded;
             return decoded;
-        } catch (e) {
-            reportError(e);
+        } catch (e: any) {
+            logError(e);
+
+            // In most cases, we get the encoded data back regardless, so recapture it here:
+            if (e.inputBuffer) {
+                this._encoded = e.inputBuffer;
+            }
+            runInAction(() => {
+                this.decodingError = e;
+            });
+
             return undefined;
         }
     });
@@ -157,12 +177,13 @@ export class HttpBody implements MessageBody {
         // Set to a valid state for an un-decoded but totally empty body.
         this._decoded = undefined;
         this._encoded = emptyBuffer;
+        this.decodingError = undefined;
         this.decodedPromise = observablePromise(Promise.resolve(emptyBuffer));
     }
 }
 
 export type CompletedRequest = Omit<HttpExchange, 'request'> & {
-    matchedRuleId: string
+    matchedRule: { id: string, handlerRype: HandlerClassKey } | false
 };
 export type CompletedExchange = Omit<HttpExchange, 'response'> & {
     response: HtkResponse | 'aborted'
@@ -182,7 +203,6 @@ export class HttpExchange extends HTKEventBase {
         this.tags = this.request.tags;
 
         this.id = this.request.id;
-        this.matchedRuleId = this.request.matchedRuleId;
         this.searchIndex = [
             this.request.url,
             this.request.parsedUrl.protocol + '//' +
@@ -191,6 +211,7 @@ export class HttpExchange extends HTKEventBase {
                 this.request.parsedUrl.search
         ]
         .concat(..._.map(this.request.headers, (value, key) => `${key}: ${value}`))
+        .concat(..._.map(this.request.trailers, (value, key) => `${key}: ${value}`))
         .concat(this.request.method)
         .join('\n')
         .toLowerCase();
@@ -199,19 +220,18 @@ export class HttpExchange extends HTKEventBase {
         this._apiMetadataPromise = apiStore.getApi(this.request);
     }
 
-    // Logic elsewhere can put values into these caches to cache calculations
-    // about this exchange weakly, so they GC with the exchange.
-    // Keyed by symbols only, so we know we never have conflicts.
-    public cache = observable.map(new Map<symbol, unknown>(), { deep: false });
-
     public readonly request: HtkRequest;
     public readonly id: string;
 
     @observable
-    public matchedRuleId: string | '?' | undefined; // Undefined initially, defined for completed requests
+    // Undefined initially, defined for completed requests, false for 'not available'
+    public matchedRule: { id: string, handlerStepTypes: HandlerClassKey[] } | false | undefined;
 
     @observable
     public tags: string[];
+
+    @observable
+    public hideErrors = false; // Set to true when errors are ignored for an exchange
 
     @computed
     get httpVersion() {
@@ -223,7 +243,7 @@ export class HttpExchange extends HTKEventBase {
     }
 
     isCompletedRequest(): this is CompletedRequest {
-        return !!this.matchedRuleId;
+        return this.matchedRule !== undefined;
     }
 
     isCompletedExchange(): this is CompletedExchange {
@@ -244,25 +264,50 @@ export class HttpExchange extends HTKEventBase {
     }
 
     @observable
-    public readonly timingEvents: TimingEvents | {};  // May be {} if using an old server (<0.1.7)
+    public readonly timingEvents: Partial<TimingEvents>; // May be {} if using an old server (<0.1.7)
 
     @observable.ref
     public response: HtkResponse | 'aborted' | undefined;
 
-    updateFromCompletedRequest(request: InputCompletedRequest) {
+    @observable
+    public abortMessage: string | undefined;
+
+    updateFromCompletedRequest(request: InputCompletedRequest, matchedRule: HtkRule | false) {
+        if (request.body instanceof HttpBody) {
+            // If this request was used in new HttpExchange, it's mutated in some ways, and this
+            // will cause problems. Shouldn't happen, but we check against it here just in case:
+            throw new Error("Can't update from already-processed request");
+        }
+
         this.request.body = new HttpBody(request, request.headers);
-        this.matchedRuleId = request.matchedRuleId || "?";
+
+        this.matchedRule = !matchedRule
+                ? false
+            : 'handler' in matchedRule
+                ? {
+                    id: matchedRule.id,
+                    handlerStepTypes: [getRulePartKey(matchedRule.handler)] as HandlerClassKey[]
+                }
+            // MatchedRule has multiple steps
+                : {
+                    id: matchedRule.id,
+                    handlerStepTypes: matchedRule.steps.map(getRulePartKey) as HandlerClassKey[]
+                };
 
         Object.assign(this.timingEvents, request.timingEvents);
         this.tags = _.union(this.tags, request.tags);
     }
 
-    markAborted(request: Pick<InputInitiatedRequest, 'timingEvents' | 'tags'>) {
+    markAborted(request: InputFailedRequest) {
         this.response = 'aborted';
         this.searchIndex += '\naborted';
 
         Object.assign(this.timingEvents, request.timingEvents);
         this.tags = _.union(this.tags, request.tags);
+
+        if ('error' in request && request.error?.message) {
+            this.abortMessage = request.error.message;
+        }
 
         if (this.requestBreakpoint) {
             this.requestBreakpoint.reject(
@@ -288,7 +333,8 @@ export class HttpExchange extends HTKEventBase {
             this.searchIndex,
             response.statusCode.toString(),
             response.statusMessage.toString(),
-            ..._.map(response.headers, (value, key) => `${key}: ${value}`)
+            ..._.map(response.headers, (value, key) => `${key}: ${value}`),
+            ..._.map(response.trailers, (value, key) => `${key}: ${value}`)
         ].join('\n').toLowerCase();
 
         // Wrap the API promise to also add this response data (but lazily)
@@ -337,10 +383,12 @@ export class HttpExchange extends HTKEventBase {
                 } else if (apiMetadata.type === 'openrpc') {
                     return await parseRpcApiExchange(apiMetadata, this);
                 } else {
+                    console.log('Unknown API metadata type for host', this.request.parsedUrl.hostname);
+                    console.log(apiMetadata);
                     throw new UnreachableCheck(apiMetadata, m => m.type);
                 }
             } catch (e) {
-                reportError(e);
+                logError(e);
                 throw e;
             }
         } else {

@@ -1,35 +1,39 @@
 import * as _ from 'lodash';
 import * as React from 'react';
-import { observer, Observer } from 'mobx-react';
+import { inject, observer, Observer } from 'mobx-react';
 import { action, computed } from 'mobx';
 
 import AutoSizer from 'react-virtualized-auto-sizer';
 import { FixedSizeList as List, ListChildComponentProps } from 'react-window';
 
 import { styled } from '../../styles'
-import { ArrowIcon, Icon, WarningIcon } from '../../icons';
+import { ArrowIcon, Icon, PhosphorIcon, WarningIcon } from '../../icons';
+
 import {
     CollectedEvent,
     HttpExchange,
     RTCStream,
-    FailedTLSConnection,
-    RTCConnection
+    FailedTlsConnection,
+    RTCConnection,
+    TlsTunnel
 } from '../../types';
 
 import {
-    getSummaryColour,
+    getSummaryColor,
     EventCategory,
     describeEventCategory
 } from '../../model/events/categorization';
+import { nameHandlerClass } from '../../model/rules/rule-descriptions';
+import { getReadableSize } from '../../util/buffer';
 
 import { UnreachableCheck } from '../../util/error';
-import { getReadableSize } from '../../model/events/bodies';
 import { filterProps } from '../component-utils';
 
 import { EmptyState } from '../common/empty-state';
 import { StatusCode } from '../common/status-code';
 
 import { HEADER_FOOTER_HEIGHT } from './view-event-list-footer';
+import { ViewEventContextMenuBuilder } from './view-context-menu-builder';
 
 const SCROLL_BOTTOM_MARGIN = 5; // If you're in the last 5 pixels of the scroll area, we say you're at the bottom
 
@@ -49,11 +53,14 @@ interface ViewEventListProps {
     selectedEvent: CollectedEvent | undefined;
     isPaused: boolean;
 
+    contextMenuBuilder: ViewEventContextMenuBuilder;
+
     moveSelection: (distance: number) => void;
     onSelected: (event: CollectedEvent | undefined) => void;
 }
 
-const ListContainer = styled.div`
+const ListContainer = styled.div<{ role: 'table' }>`
+    display: block;
     flex-grow: 1;
     position: relative;
     width: 100%;
@@ -73,7 +80,8 @@ const ListContainer = styled.div`
     }
 `;
 
-const Column = styled.div`
+const Column = styled.div<{ role: 'cell' | 'columnheader' }>`
+    display: block;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -105,13 +113,17 @@ const RowPin = styled(
             padding: 8px 0;
             width: 0 !important;
             margin: 0 !important;
+
+            > path {
+                display: none;
+            }
         `
     }
 `;
 
 const RowMarker = styled(Column)`
     transition: color 0.2s;
-    color: ${(p: { category: EventCategory }) => getSummaryColour(p.category)};
+    color: ${(p: { category: EventCategory }) => getSummaryColor(p.category)};
 
     background-color: currentColor;
 
@@ -124,7 +136,7 @@ const RowMarker = styled(Column)`
     border-left: 5px solid ${p => p.theme.containerBackground};
 `;
 
-const MarkerHeader = styled.div`
+const MarkerHeader = styled.div<{ role: 'columnheader' }>`
     flex-basis: 10px;
     flex-shrink: 0;
 `;
@@ -151,7 +163,10 @@ const Source = styled(Column)`
     flex-basis: 49px;
     flex-shrink: 0;
     flex-grow: 0;
-    text-align: center;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
 `;
 
 const Host = styled(Column)`
@@ -211,7 +226,7 @@ const BuiltInApiRequestDetails = styled(Column)`
     flex-basis: 1000px;
 `;
 
-const EventListRow = styled.div`
+const EventListRow = styled.div<{ role: 'row' }>`
     display: flex;
     flex-direction: row;
     align-items: center;
@@ -222,6 +237,14 @@ const EventListRow = styled.div`
     &.selected {
         background-color: ${p => p.theme.highlightBackground};
         font-weight: bold;
+
+        color: ${p => p.theme.highlightColor};
+        fill: ${p => p.theme.highlightColor};
+        * {
+            /* Override status etc colours to ensure contrast & give row max visibility */
+            color: ${p => p.theme.highlightColor};
+            fill: ${p => p.theme.highlightColor};
+        }
     }
 
     &:focus {
@@ -247,7 +270,7 @@ const TrafficEventListRow = styled(EventListRow)`
     }
 `;
 
-const FailedRequestListRow = styled(EventListRow)`
+const TlsListRow = styled(EventListRow)`
     height: 28px !important; /* Important required to override react-window's style attr */
     margin: 2px 0;
 
@@ -268,7 +291,7 @@ const FailedRequestListRow = styled(EventListRow)`
     }
 `;
 
-export const TableHeader = styled.header`
+export const TableHeaderRow = styled.div<{ role: 'row' }>`
     height: 38px;
     overflow: hidden;
     width: 100%;
@@ -287,7 +310,7 @@ export const TableHeader = styled.header`
     padding-right: 18px;
     box-sizing: border-box;
 
-    > div {
+    > div[role=columnheader] {
         padding: 5px 0;
         margin-right: 10px;
         min-width: 0px;
@@ -302,22 +325,23 @@ interface EventRowProps extends ListChildComponentProps {
     data: {
         selectedEvent: CollectedEvent | undefined;
         events: CollectedEvent[];
+        contextMenuBuilder: ViewEventContextMenuBuilder;
     }
 }
 
 const EventRow = observer((props: EventRowProps) => {
     const { index, style } = props;
-    const { events, selectedEvent } = props.data;
+    const { events, selectedEvent, contextMenuBuilder } = props.data;
     const event = events[index];
 
     const isSelected = (selectedEvent === event);
 
-    if (event.isTLSFailure()) {
-        return <FailedRequestRow
+    if (event.isTlsFailure() || event.isTlsTunnel()) {
+        return <TlsRow
             index={index}
             isSelected={isSelected}
             style={style}
-            failure={event}
+            tlsEvent={event}
         />;
     } else if (event.isHttp()) {
         if (event.api?.isBuiltInApi && event.api.matchedOperation()) {
@@ -326,6 +350,7 @@ const EventRow = observer((props: EventRowProps) => {
                 isSelected={isSelected}
                 style={style}
                 exchange={event}
+                contextMenuBuilder={contextMenuBuilder}
             />
         } else {
             return <ExchangeRow
@@ -333,6 +358,7 @@ const EventRow = observer((props: EventRowProps) => {
                 isSelected={isSelected}
                 style={style}
                 exchange={event}
+                contextMenuBuilder={contextMenuBuilder}
             />;
         }
     } else if (event.isRTCConnection()) {
@@ -354,16 +380,18 @@ const EventRow = observer((props: EventRowProps) => {
     }
 });
 
-const ExchangeRow = observer(({
+const ExchangeRow = inject('uiStore')(observer(({
     index,
     isSelected,
     style,
-    exchange
+    exchange,
+    contextMenuBuilder
 }: {
     index: number,
     isSelected: boolean,
     style: {},
-    exchange: HttpExchange
+    exchange: HttpExchange,
+    contextMenuBuilder: ViewEventContextMenuBuilder
 }) => {
     const {
         request,
@@ -374,18 +402,36 @@ const ExchangeRow = observer(({
 
     return <TrafficEventListRow
         role="row"
-        aria-label='row'
+        aria-label={
+            `${_.startCase(exchange.category)} ${
+                request.method
+            } request ${
+                response === 'aborted' || exchange.isWebSocket()
+                    ? '' // Stated by the category already
+                : exchange.isBreakpointed
+                    ? 'waiting at a breakpoint'
+                : !response
+                    ? 'waiting for a response'
+                // Actual response:
+                    : `with a ${response.statusCode} response`
+            } sent to ${
+                // We include host+path but not protocol or search here, to keep this short
+                request.parsedUrl.host + request.parsedUrl.pathname
+            } by ${
+                request.source.summary
+            }`
+        }
         aria-rowindex={index + 1}
         data-event-id={exchange.id}
         tabIndex={isSelected ? 0 : -1}
-
+        onContextMenu={contextMenuBuilder.getContextMenuCallback(exchange)}
         className={isSelected ? 'selected' : ''}
         style={style}
     >
-        <RowPin pinned={pinned}/>
-        <RowMarker category={category} title={describeEventCategory(category)} />
-        <Method pinned={pinned}>{ request.method }</Method>
-        <Status>
+        <RowPin aria-label={pinned ? 'Pinned' : undefined} pinned={pinned}/>
+        <RowMarker role='cell' category={category} title={describeEventCategory(category)} />
+        <Method role='cell' pinned={pinned}>{ request.method }</Method>
+        <Status role='cell'>
             {
                 response === 'aborted'
                     ? <StatusCode status={'aborted'} />
@@ -408,22 +454,39 @@ const ExchangeRow = observer(({
                 />
             }
         </Status>
-        <Source title={request.source.summary}>
+        <Source role='cell'>
             <Icon
+                title={request.source.summary}
                 {...request.source.icon}
                 fixedWidth={true}
             />
+            {
+                exchange.matchedRule &&
+                exchange.matchedRule.handlerStepTypes.some(t =>
+                    t !== 'passthrough' && t !== 'ws-passthrough' && t !== 'rtc-dynamic-proxy'
+                ) &&
+                <PhosphorIcon
+                    icon='Pencil'
+                    alt={`Handled by ${
+                        exchange.matchedRule.handlerStepTypes.length === 1
+                        ? nameHandlerClass(exchange.matchedRule.handlerStepTypes[0])
+                        : 'multi-step'
+                    } rule`}
+                    size='20px'
+                    color={getSummaryColor('mutative')}
+                />
+            }
         </Source>
-        <Host title={ request.parsedUrl.host }>
+        <Host role='cell' title={ request.parsedUrl.host }>
             { request.parsedUrl.host }
         </Host>
-        <PathAndQuery title={ request.parsedUrl.pathname + request.parsedUrl.search }>
+        <PathAndQuery role='cell' title={ request.parsedUrl.pathname + request.parsedUrl.search }>
             { request.parsedUrl.pathname + request.parsedUrl.search }
         </PathAndQuery>
     </TrafficEventListRow>;
-});
+}));
 
-const RTCConnectedIcon = styled(Icon).attrs(() => ({
+const ConnectedSpinnerIcon = styled(Icon).attrs(() => ({
     icon: ['fas', 'spinner'],
     spin: true,
     title: 'Connected'
@@ -446,7 +509,17 @@ const RTCConnectionRow = observer(({
 
     return <TrafficEventListRow
         role="row"
-        aria-label='row'
+        aria-label={
+            `${
+                event.closeState ? 'Closed' : 'Open'
+            } RTC connection from ${
+                event.clientURL
+            } to ${
+                event.remoteURL ?? 'an unknown peer'
+            } opened by ${
+                event.source.summary
+            }`
+        }
         aria-rowindex={index + 1}
         data-event-id={event.id}
         tabIndex={isSelected ? 0 : -1}
@@ -455,17 +528,17 @@ const RTCConnectionRow = observer(({
         style={style}
     >
         <RowPin pinned={pinned}/>
-        <RowMarker category={category} title={describeEventCategory(category)} />
-        <EventTypeColumn>
-            { !event.closeState && <RTCConnectedIcon /> } WebRTC
+        <RowMarker role='cell' category={category} title={describeEventCategory(category)} />
+        <EventTypeColumn role='cell'>
+            { !event.closeState && <ConnectedSpinnerIcon /> } WebRTC
         </EventTypeColumn>
-        <Source title={event.source.summary}>
+        <Source role='cell' title={event.source.summary}>
             <Icon
                 {...event.source.icon}
                 fixedWidth={true}
             />
         </Source>
-        <RTCConnectionDetails>
+        <RTCConnectionDetails role='cell'>
             {
                 event.clientURL
             } <ArrowIcon direction='right' /> {
@@ -490,7 +563,31 @@ const RTCStreamRow = observer(({
 
     return <TrafficEventListRow
         role="row"
-        aria-label='row'
+        aria-label={
+            `${
+                event.closeState ? 'Closed' : 'Open'
+            } RTC ${
+                event.isRTCDataChannel() ? 'data' : 'media'
+            } stream to ${
+                event.rtcConnection.remoteURL
+            } opened by ${
+                event.rtcConnection.source.summary
+            } ${
+                event.isRTCDataChannel()
+                ? `called ${
+                        event.label
+                    }${
+                        event.protocol ? ` (${event.protocol})` : ''
+                    } with ${event.messages.length} message${
+                        event.messages.length !== 1 ? 's' : ''
+                    }`
+                : `for ${event.direction} ${event.type} with ${
+                        getReadableSize(event.totalBytesSent)
+                    } sent and ${
+                        getReadableSize(event.totalBytesReceived)
+                    } received`
+            }`
+        }
         aria-rowindex={index + 1}
         data-event-id={event.id}
         tabIndex={isSelected ? 0 : -1}
@@ -499,25 +596,25 @@ const RTCStreamRow = observer(({
         style={style}
     >
         <RowPin pinned={pinned}/>
-        <RowMarker category={category} title={describeEventCategory(category)} />
-        <EventTypeColumn>
-            { !event.closeState && <RTCConnectedIcon /> } WebRTC {
+        <RowMarker role='cell' category={category} title={describeEventCategory(category)} />
+        <EventTypeColumn role='cell'>
+            { !event.closeState && <ConnectedSpinnerIcon /> } WebRTC {
                 event.isRTCDataChannel()
                     ? 'Data'
                 : // RTCMediaTrack:
                     'Media'
             }
         </EventTypeColumn>
-        <Source title={event.rtcConnection.source.summary}>
+        <Source role='cell' title={event.rtcConnection.source.summary}>
             <Icon
                 {...event.rtcConnection.source.icon}
                 fixedWidth={true}
             />
         </Source>
-        <RTCEventLabel>
+        <RTCEventLabel role='cell'>
             <ArrowIcon direction='right' /> { event.rtcConnection.remoteURL }
         </RTCEventLabel>
-        <RTCEventDetails>
+        <RTCEventDetails role='cell'>
             {
                 event.isRTCDataChannel()
                     ? <>
@@ -545,7 +642,8 @@ const BuiltInApiRow = observer((p: {
     index: number,
     exchange: HttpExchange,
     isSelected: boolean,
-    style: {}
+    style: {},
+    contextMenuBuilder: ViewEventContextMenuBuilder
 }) => {
     const {
         request,
@@ -554,71 +652,95 @@ const BuiltInApiRow = observer((p: {
     } = p.exchange;
     const api = p.exchange.api!; // Only shown for built-in APIs, so this must be set
 
+    const apiOperationName =  _.startCase(
+        api.operation.name
+        .replace('eth_', '') // One-off hack for Ethereum, but result looks much nicer.
+    );
+
+    const apiRequestDescription = api.request.parameters
+        .filter(param => param.value !== undefined)
+        .map(param => `${param.name}=${JSON.stringify(param.value)}`)
+        .join(', ');
+
     return <TrafficEventListRow
         role="row"
-        aria-label='row'
+        aria-label={
+            `${_.startCase(category)} ${
+                api.service.shortName
+            } ${
+                apiOperationName
+            }${
+                apiRequestDescription
+                ? ` with ${apiRequestDescription}`
+                : ''
+            } sent by ${
+                request.source.summary
+            }`
+        }
         aria-rowindex={p.index + 1}
         data-event-id={p.exchange.id}
         tabIndex={p.isSelected ? 0 : -1}
 
+        onContextMenu={p.contextMenuBuilder.getContextMenuCallback(p.exchange)}
         className={p.isSelected ? 'selected' : ''}
         style={p.style}
     >
         <RowPin pinned={pinned}/>
-        <RowMarker category={category} title={describeEventCategory(category)} />
-        <EventTypeColumn>
-            { api.service.shortName }: {
-                _.startCase(
-                    api.operation.name
-                    .replace('eth_', '') // One-off hack for Ethereum, but result looks much nicer.
-                )
-            }
+        <RowMarker role='cell' category={category} title={describeEventCategory(category)} />
+        <EventTypeColumn role='cell'>
+            { api.service.shortName }: { apiOperationName }
         </EventTypeColumn>
-        <Source title={request.source.summary}>
+        <Source role='cell' title={request.source.summary}>
             <Icon
                 {...request.source.icon}
                 fixedWidth={true}
             />
         </Source>
-        <BuiltInApiRequestDetails>
-            {
-                api.request.parameters
-                .filter(param => param.value !== undefined)
-                .map(param => `${param.name}=${JSON.stringify(param.value)}`)
-                .join(', ')
-            }
+        <BuiltInApiRequestDetails role='cell'>
+            { apiRequestDescription }
         </BuiltInApiRequestDetails>
     </TrafficEventListRow>
 });
 
-const FailedRequestRow = observer((p: {
+const TlsRow = observer((p: {
     index: number,
-    failure: FailedTLSConnection,
+    tlsEvent: FailedTlsConnection | TlsTunnel,
     isSelected: boolean,
     style: {}
-}) =>
-    <FailedRequestListRow
+}) => {
+    const { tlsEvent } = p;
+
+    const description = tlsEvent.isTlsTunnel()
+        ? 'Tunnelled TLS '
+        : ({
+            'closed': 'Aborted ',
+            'reset': 'Aborted ',
+            'unknown': 'Aborted ',
+            'cert-rejected': 'Certificate rejected for ',
+            'no-shared-cipher': 'HTTPS setup failed for ',
+        } as _.Dictionary<string>)[tlsEvent.failureCause];
+
+    const connectionTarget = tlsEvent.upstreamHostname || 'unknown domain';
+
+    return <TlsListRow
         role="row"
-        aria-label='row'
+        aria-label={`${description} connection to ${connectionTarget}`}
         aria-rowindex={p.index + 1}
-        data-event-id={p.failure.id}
+        data-event-id={tlsEvent.id}
         tabIndex={p.isSelected ? 0 : -1}
 
         className={p.isSelected ? 'selected' : ''}
         style={p.style}
     >
         {
-            ({
-                'closed': 'Aborted ',
-                'reset': 'Aborted ',
-                'unknown': 'Aborted ',
-                'cert-rejected': 'Certificate rejected for ',
-                'no-shared-cipher': 'HTTPS setup failed for ',
-            } as _.Dictionary<string>)[p.failure.failureCause]
-        }
-        connection to { p.failure.hostname || 'unknown domain' }
-    </FailedRequestListRow>
-);
+            tlsEvent.isTlsTunnel() &&
+            tlsEvent.isOpen() &&
+                <ConnectedSpinnerIcon />
+        } {
+            description
+        } connection to { connectionTarget }
+    </TlsListRow>
+});
 
 @observer
 export class ViewEventList extends React.Component<ViewEventListProps> {
@@ -633,7 +755,8 @@ export class ViewEventList extends React.Component<ViewEventListProps> {
     @computed get listItemData(): EventRowProps['data'] {
         return {
             selectedEvent: this.props.selectedEvent,
-            events: this.props.filteredEvents
+            events: this.props.filteredEvents,
+            contextMenuBuilder: this.props.contextMenuBuilder
         };
     }
 
@@ -642,7 +765,7 @@ export class ViewEventList extends React.Component<ViewEventListProps> {
 
     private KeyBoundListWindow = observer(
         React.forwardRef<HTMLDivElement>(
-            (props: any, ref) => <section
+            (props: any, ref) => <div
                 {...props}
                 style={Object.assign({}, props.style, { 'overflowY': 'scroll' })}
                 ref={ref}
@@ -658,29 +781,29 @@ export class ViewEventList extends React.Component<ViewEventListProps> {
     render() {
         const { events, filteredEvents, isPaused } = this.props;
 
-        return <ListContainer>
-            <TableHeader>
-                <MarkerHeader />
-                <Method>Method</Method>
-                <Status>Status</Status>
-                <Source>Source</Source>
-                <Host>Host</Host>
-                <PathAndQuery>Path and query</PathAndQuery>
-            </TableHeader>
+        return <ListContainer role="table">
+            <TableHeaderRow role="row">
+                <MarkerHeader role="columnheader" aria-label="Category" />
+                <Method role="columnheader">Method</Method>
+                <Status role="columnheader">Status</Status>
+                <Source role="columnheader">Source</Source>
+                <Host role="columnheader">Host</Host>
+                <PathAndQuery role="columnheader">Path and query</PathAndQuery>
+            </TableHeaderRow>
 
             {
                 events.length === 0
                 ? (isPaused
-                    ? <EmptyStateOverlay icon={['fas', 'pause']}>
+                    ? <EmptyStateOverlay icon='Pause'>
                         Interception is paused, resume it to collect intercepted requests
                     </EmptyStateOverlay>
-                    : <EmptyStateOverlay icon={['fas', 'plug']}>
+                    : <EmptyStateOverlay icon='Plug'>
                         Connect a client and intercept some requests, and they'll appear here
                     </EmptyStateOverlay>
                 )
 
                 : filteredEvents.length === 0
-                ? <EmptyStateOverlay icon={['fas', 'question']}>
+                ? <EmptyStateOverlay icon='QuestionMark'>
                         No requests match this search filter{
                             isPaused ? ' and interception is paused' : ''
                         }

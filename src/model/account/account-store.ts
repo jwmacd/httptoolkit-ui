@@ -1,25 +1,29 @@
 import * as _ from 'lodash';
-import { observable, action, flow, computed, when } from 'mobx';
+import { observable, action, flow, computed, when, observe } from 'mobx';
 
-import { reportError, reportErrorsAsUser } from '../../errors';
-import { trackEvent } from '../../tracking';
+import { logError, logErrorsAsUser } from '../../errors';
+import { trackEvent } from '../../metrics';
 import { delay } from '../../util/promise';
-import { lazyObservablePromise } from '../../util/observable';
+import { ObservablePromise, lazyObservablePromise, observablePromise } from '../../util/observable';
 
 import {
+    initializeAuthUi,
     loginEvents,
     showLoginDialog,
     logOut,
+
     User,
     getLatestUserData,
     getLastUserData,
-    RefreshRejectedError
-} from './auth';
-import {
+    RefreshRejectedError,
+
+    SKU,
     SubscriptionPlans,
-    SubscriptionPlanCode,
-    openCheckout
-} from './subscriptions';
+    prepareCheckout,
+    openNewCheckoutWindow,
+    cancelSubscription,
+    loadPlanPricesUntilSuccess
+} from '@httptoolkit/accounts';
 
 export class AccountStore {
 
@@ -28,11 +32,37 @@ export class AccountStore {
     ) {}
 
     readonly initialized = lazyObservablePromise(async () => {
+        // All async auth-related errors at any stage (bad tokens, invalid subscription data,
+        // misc failures) will come through here, so we can log & debug later.
+        loginEvents.on('app_error', logError);
+
+        initializeAuthUi({
+            // Proper indefinitely persistent session via refreshable token please
+            refreshToken: true,
+
+            // Don't persist logins for auto-login later. That makes sense for apps you log into
+            // every day, but it's weird otherwise (e.g. after logout -> one-click login? Very odd).
+            rememberLastLogin: false
+        });
+
+        this.subscriptionPlans = observablePromise(
+            loadPlanPricesUntilSuccess()
+        );
+
         // Update account data automatically on login, logout & every 10 mins
-        loginEvents.on('authenticated', async () => {
+        loginEvents.on('authenticated', async (authResult) => {
+            // If a user logs in after picking a plan, they're going to go to the
+            // checkout imminently. The API has to query Paddle to build that checkout,
+            // so we ping here early to kick that process off ASAP:
+            const initialEmailResult = authResult?.idTokenPayload?.email;
+            if (initialEmailResult && this.selectedPlan) {
+                prepareCheckout(initialEmailResult, this.selectedPlan, 'app');
+            }
+
             await this.updateUser();
             loginEvents.emit('user_data_loaded');
         });
+
         loginEvents.on('authorization_error', (error) => {
             if (error instanceof RefreshRejectedError) {
                 // If our refresh token ever becomes invalid (caused once by an Auth0 regression,
@@ -41,11 +71,38 @@ export class AccountStore {
                 this.logIn();
             }
         });
-        loginEvents.on('logout', this.updateUser);
-        setInterval(this.updateUser, 1000 * 60 * 10);
-        this.updateUser();
 
-        console.log('Account store created');
+        this.updateUser();
+        setInterval(this.updateUser, 1000 * 60 * 10);
+        loginEvents.on('logout', this.updateUser);
+
+        // Whenever account data updates, check if we're a non-user team admin, and notify (and
+        // logout) if so. This isn't a security measure (admin's dont get access anyway) it's just
+        // a UX question, as it can be confusing for admins otherwise when logging in doesn't work.
+        observe(this, 'accountDataLastUpdated', () => {
+            if (
+                !this.user.subscription &&
+                this.user.teamSubscription
+            ) {
+                alert(
+                    "You are the administrator of an HTTP Toolkit team, but you aren't listed " +
+                    "as an active member, so you don't have access to HTTP Toolkit's " +
+                    "paid features yourself." +
+                    "\n\n" +
+                    "To manage your team, please visit accounts.httptoolkit.tech."
+                );
+
+                window.open(
+                    "https://accounts.httptoolkit.tech",
+                    "_blank",
+                    "noreferrer noopener"
+                );
+
+                this.logOut();
+            }
+        });
+
+        console.log('Account store initialized');
     });
 
     @observable
@@ -53,6 +110,10 @@ export class AccountStore {
 
     @observable
     accountDataLastUpdated = 0;
+
+    // Set when we know a checkout/cancel is processing elsewhere:
+    @observable
+    isAccountUpdateInProcess = false;
 
     @computed get userEmail() {
         return this.user.email;
@@ -70,21 +131,21 @@ export class AccountStore {
 
         // Include the user email in error reports whilst they're logged in.
         // Useful generally, but especially for checkout/subscription issues.
-        reportErrorsAsUser(this.user.email);
+        logErrorsAsUser(this.user.email);
 
         if (this.user.banned) {
-            alert('Your account has been blocked for abuse. Please contact help@httptoolkit.tech.');
+            alert('Your account has been blocked for abuse. Please contact help@httptoolkit.com.');
             window.close();
         }
     }.bind(this));
 
-    readonly subscriptionPlans = SubscriptionPlans;
+    subscriptionPlans!: ObservablePromise<SubscriptionPlans>;
 
     @observable
     modal: 'login' | 'pick-a-plan' | 'post-checkout' | undefined;
 
     @observable
-    private selectedPlan: SubscriptionPlanCode | undefined;
+    private selectedPlan: SKU | undefined;
 
     @computed get isLoggedIn() {
         return !!this.user.email;
@@ -117,7 +178,7 @@ export class AccountStore {
         // and I can't do that if it doesn't pay my bills!
         //
         // Fund open source - if you want Pro, help pay for its development.
-        // Can't afford it? Get in touch: tim@httptoolkit.tech.
+        // Can't afford it? Get in touch: tim@httptoolkit.com.
         // ------------------------------------------------------------------
 
         // If you're before the last expiry date, your subscription is valid,
@@ -152,9 +213,9 @@ export class AccountStore {
 
     getPro = flow(function * (this: AccountStore, source: string) {
         try {
-            trackEvent({ category: 'Account', action: 'Get Pro', label: source });
+            trackEvent({ category: 'Account', action: 'Get Pro', value: source });
 
-            const selectedPlan: SubscriptionPlanCode | undefined = yield this.pickPlan();
+            const selectedPlan: SKU | undefined = yield this.pickPlan();
             if (!selectedPlan) return;
 
             if (!this.isLoggedIn) yield this.logIn();
@@ -165,36 +226,16 @@ export class AccountStore {
                 return;
             }
 
-            const isRiskyPayment = this.subscriptionPlans[selectedPlan].prices?.currency === 'BRL' &&
-                this.userEmail?.endsWith('@gmail.com'); // So far, all chargebacks have been from gmail accounts
-
-            const newUser = !this.user.subscription; // Even cancelled users will have an expired subscription left
-            if (newUser && isRiskyPayment) {
-                // This is annoying, I wish we didn't have to do this, but fraudulent BRL payments are now 80% of chargebacks,
-                // and we need to tighten this up and block that somehow or payment platforms will eventually block
-                // HTTP Toolkit globally. This error message is left intentionally vague to try and discourage fraudsters
-                // from using a VPN to work around it. We do still allow this for existing customers, who are already
-                // logged in - we're attempting to just block the creation of new accounts here.
-
-                trackEvent({ category: 'Account', action: 'Blocked purchase', label: selectedPlan });
-
-                alert(
-                    "Unfortunately, due to high levels of recent chargebacks & fraud, subscriptions for new accounts "+
-                    "will temporarily require manual validation & processing before setup.\n\n" +
-                    "Please email purchase@httptoolkit.tech to begin this process."
-                );
-
-                return;
-            }
-
-            // Otherwise, it's checkout time, and the rest is in the hands of Paddle
+            // It's checkout time, and the rest is in the hands of Paddle/PayPro
             yield this.purchasePlan(this.user.email!, selectedPlan);
         } catch (error: any) {
-            reportError(error);
+            logError(error);
             alert(`${
                 error.message || error.code || 'Error'
-            }\n\nPlease check your email for details.\nIf you need help, get in touch at billing@httptoolkit.tech.`);
+            }\n\nPlease check your email for details.\nIf you need help, get in touch at billing@httptoolkit.com.`);
             this.modal = undefined;
+        } finally {
+            this.selectedPlan = undefined;
         }
     }.bind(this));
 
@@ -229,27 +270,26 @@ export class AccountStore {
     }
 
     private pickPlan = flow(function * (this: AccountStore) {
+        this.selectedPlan = undefined;
         this.modal = 'pick-a-plan';
 
         yield when(() => this.modal === undefined || !!this.selectedPlan);
 
-        const selectedPlan = this.selectedPlan;
-        this.selectedPlan = undefined;
         this.modal = undefined;
 
-        if (selectedPlan) {
-            trackEvent({ category: 'Account', action: 'Plan selected', label: selectedPlan });
+        if (this.selectedPlan) {
+            trackEvent({ category: 'Account', action: 'Plan selected', value: this.selectedPlan });
         } else if (!this.isPaidUser) {
             // If you don't pick a plan via any route other than already having
             // bought them, then you're pretty clearly rejecting them.
             trackEvent({ category: 'Account', action: 'Plans rejected' });
         }
 
-        return selectedPlan;
+        return this.selectedPlan;
     });
 
     @action.bound
-    setSelectedPlan(plan: SubscriptionPlanCode | undefined) {
+    setSelectedPlan(plan: SKU | undefined) {
         if (plan) {
             this.selectedPlan = plan;
         } else {
@@ -257,10 +297,26 @@ export class AccountStore {
         }
     }
 
-    private purchasePlan = flow(function * (this: AccountStore, email: string, planCode: SubscriptionPlanCode) {
-        openCheckout(email, planCode);
-        this.modal = 'post-checkout';
+    private purchasePlan = flow(function * (this: AccountStore, email: string, sku: SKU) {
+        openNewCheckoutWindow(email, sku, 'app');
 
+        this.modal = 'post-checkout';
+        this.isAccountUpdateInProcess = true;
+        yield this.waitForUserUpdate(() => this.isPaidUser || !this.modal);
+        this.isAccountUpdateInProcess = false;
+        this.modal = undefined;
+
+        trackEvent({
+            category: 'Account',
+            action: this.isPaidUser ? 'Checkout complete' : 'Checkout cancelled',
+            value: sku
+        });
+    });
+
+    private waitForUserUpdate = flow(function * (
+        this: AccountStore,
+        completedCheck: () => boolean
+    ) {
         let focused = true;
 
         const setFocused = () => {
@@ -275,37 +331,52 @@ export class AccountStore {
         window.addEventListener('focus', setFocused);
         window.addEventListener('blur', setUnfocused);
 
-        // Keep checking the user's subscription data whilst they check out in their browser...
+        // Keep checking the user's subscription data at intervals, whilst other processes
+        // (browser checkout, update from payment provider) complete elsewhere...
         yield this.updateUser();
         let ticksSinceCheck = 0;
-        while (!this.isPaidUser && this.modal) {
-            yield delay(500);
+        while (!completedCheck()) {
+            yield delay(1000);
             ticksSinceCheck += 1;
 
-            if (focused || ticksSinceCheck > 20) {
+            if (focused || ticksSinceCheck > 10) {
                 // Every 10s while blurred or 500ms while focused, check the user data:
                 ticksSinceCheck = 0;
                 yield this.updateUser();
             }
         }
 
-        if (this.isPaidUser && !focused) window.focus(); // Jump back to the front after checkout
+        if (completedCheck() && !focused) window.focus(); // Jump back to the front after update
 
         window.removeEventListener('focus', setFocused);
         window.removeEventListener('blur', setUnfocused);
-
-        trackEvent({
-            category: 'Account',
-            action: this.isPaidUser ? 'Checkout complete' : 'Checkout cancelled',
-            label: planCode
-        });
-
-        this.modal = undefined;
     });
 
     @action.bound
     cancelCheckout() {
         this.modal = this.selectedPlan = undefined;
     }
+
+    get canManageSubscription() {
+        return !!this.userSubscription?.canManageSubscription;
+    }
+
+    cancelSubscription = flow(function * (this: AccountStore) {
+        try {
+            this.isAccountUpdateInProcess = true;
+            yield cancelSubscription();
+            yield this.waitForUserUpdate(() =>
+                !this.user.subscription ||
+                this.user.subscription.status === 'deleted'
+            );
+            console.log('Subscription cancellation confirmed');
+        } catch (e: any) {
+            console.log(e);
+            logError(`Subscription cancellation failed: ${e.message || e}`);
+            throw e;
+        } finally {
+            this.isAccountUpdateInProcess = false;
+        }
+    });
 
 }

@@ -1,20 +1,38 @@
 import * as _ from 'lodash';
 import { MessageBody } from '../../types';
+import {
+    isProbablyProtobuf,
+    isValidProtobuf
+} from '../../util/protobuf';
 
 // Simplify a mime type as much as we can, without throwing any errors
 export const getBaseContentType = (mimeType: string | undefined) => {
     const typeWithoutParams = (mimeType || '').split(';')[0];
-    const [type, combinedSubTypes] = typeWithoutParams.split(/\/(.+)/);
 
+    let [type, combinedSubTypes] = typeWithoutParams.split(/\/(.+)/);
     if (!combinedSubTypes) return type;
 
-    // A list of types from most specific to most generic: [svg, xml] for image/svg+xml
-    const subTypes = combinedSubTypes.split('+');
+    if (DEFAULT_SUBTYPE[combinedSubTypes]) {
+        combinedSubTypes = `${combinedSubTypes}+${DEFAULT_SUBTYPE[combinedSubTypes]}`;
+    }
 
+    // If this is a known type with an exact match, return that directly:
+    if (mimeTypeToContentTypeMap[type + '/' + combinedSubTypes]) {
+        return type + '/' + combinedSubTypes;
+    }
+
+    // Otherwise, wr collect a list of types from most specific to most generic: [svg, xml] for image/svg+xml
+    // and then look through in order to see if there are any matches here:
+    const subTypes = combinedSubTypes.split('+');
     const possibleTypes = subTypes.map(st => type + '/' + st);
-    return _.find(possibleTypes, t => !!mimeTypeToContentTypeMap[t]) ||
+
+    return _.find(possibleTypes, t => !!mimeTypeToContentTypeMap[t]) || // Subtype match
         _.last(possibleTypes)!; // If we recognize none - return the most generic
 }
+
+const DEFAULT_SUBTYPE: { [type: string]: string } = {
+    'grpc': 'proto' // Protobuf is the default gRPC content type (but not the only one!)
+};
 
 export type ViewableContentType =
     | 'raw'
@@ -28,7 +46,9 @@ export type ViewableContentType =
     | 'javascript'
     | 'markdown'
     | 'yaml'
-    | 'image';
+    | 'image'
+    | 'protobuf'
+    | 'grpc-proto';
 
 export const EditableContentTypes = [
     'text',
@@ -75,6 +95,7 @@ const mimeTypeToContentTypeMap: { [mimeType: string]: ViewableContentType } = {
     'image/svg': 'image',
     'image/tiff': 'image',
     'image/webp': 'image',
+    'image/avif': 'image',
     'image/x-icon': 'image',
     'image/vnd.microsoft.icon': 'image',
 
@@ -82,6 +103,15 @@ const mimeTypeToContentTypeMap: { [mimeType: string]: ViewableContentType } = {
 
     'text/html': 'html',
     'application/xhtml': 'html',
+
+    'application/protobuf': 'protobuf',
+    'application/x-protobuf': 'protobuf',
+    'application/vnd.google.protobuf': 'protobuf',
+    'application/x-google-protobuf': 'protobuf',
+    'application/proto': 'protobuf', // N.b. this covers all application/XXX+proto values
+    'application/x-protobuffer': 'protobuf', // Commonly seen in Google apps
+
+    'application/grpc+proto': 'grpc-proto', // Used in GRPC requests (protobuf but with special headers)
 
     'application/octet-stream': 'raw'
 } as const;
@@ -91,19 +121,24 @@ export function getContentType(mimeType: string | undefined): ViewableContentTyp
     return mimeTypeToContentTypeMap[baseContentType!];
 }
 
+export function getEditableContentTypeFromViewable(contentType: ViewableContentType): EditableContentType | undefined {
+    if (EditableContentTypes.includes(contentType as any)) {
+        return contentType as EditableContentType;
+    }
+}
+
 export function getEditableContentType(mimeType: string | undefined): EditableContentType | undefined {
     const baseContentType = getBaseContentType(mimeType);
     const viewableContentType = mimeTypeToContentTypeMap[baseContentType!];
-
-    if (EditableContentTypes.includes(viewableContentType as any)) {
-        return viewableContentType as EditableContentType;
-    }
+    return getEditableContentTypeFromViewable(viewableContentType);
 }
 
 export function getContentEditorName(contentType: ViewableContentType): string {
     return contentType === 'raw' ? 'Hex'
         : contentType === 'json' ? 'JSON'
+        : contentType === 'css' ? 'CSS'
         : contentType === 'url-encoded' ? 'URL-Encoded'
+        : contentType === 'grpc-proto' ? 'gRPC'
         : _.capitalize(contentType);
 }
 
@@ -126,37 +161,45 @@ export function getCompatibleTypes(
     rawContentType: string | undefined,
     body: MessageBody | Buffer | undefined
 ): ViewableContentType[] {
-    let types = [contentType];
+    let types = new Set([contentType]);
 
     if (body && !Buffer.isBuffer(body)) {
         body = body.decoded;
     }
 
     // Examine the first char of the body, assuming it's ascii
-    let firstChar = body && body.slice(0, 1).toString('ascii');
+    const firstChar = body && body.slice(0, 1).toString('ascii');
 
-    // Allow formatting non-JSON text as JSON, if it looks like it might be
-    if (contentType === 'text' && (firstChar === '{' || firstChar === '[')) {
-        types.push('json');
+    // Allow optionally formatting non-JSON as JSON, if it looks like it might be
+    if (firstChar === '{' || firstChar === '[') {
+        types.add('json');
     }
 
-    // Allow formatting non-XML plain text as XML, if it looks like it might be
-    if (contentType === 'text' && firstChar === '<') {
-        types.push('xml');
+    // Allow optionally formatting non-XML as XML, if it looks like it might be
+    if (firstChar === '<') {
+        types.add('xml');
     }
 
-    // Pretty much anything can be shown as plain text, if you like
-    if (!_.includes(['text'], contentType)) {
-        types.push('text');
+    if (!types.has('grpc-proto') && rawContentType === 'application/grpc') {
+        types.add('grpc-proto')
     }
 
-    // SVGs can be shown as XML
+    if (
+        body &&
+        isProbablyProtobuf(body) &&
+        !types.has('protobuf') &&
+        !types.has('grpc-proto') &&
+        // If it's probably unmarked protobuf, and it's a manageable size, try
+        // parsing it just to check:
+        (body.length < 100_000 && isValidProtobuf(body))
+    ) {
+        types.add('protobuf');
+    }
+
+    // SVGs can always be shown as XML
     if (rawContentType && rawContentType.startsWith('image/svg')) {
-        types.push('xml');
+        types.add('xml');
     }
-
-    // Anything can be shown raw
-    if (contentType !== 'raw') types.push('raw');
 
     if (
         body &&
@@ -165,8 +208,12 @@ export function getCompatibleTypes(
         body.length < 1000 * 100 && // < 100 KB of content
         body.every(isValidBase64Byte)
     ) {
-        types.push('base64');
+        types.add('base64');
     }
 
-    return types;
+    // Lastly, anything can be shown raw or as text, if you like:
+    types.add('text');
+    types.add('raw');
+
+    return Array.from(types);
 }

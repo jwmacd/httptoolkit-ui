@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.tech>
+ * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.com>
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -8,13 +8,13 @@ import { action, computed, observable } from 'mobx';
 import { inject, observer } from 'mobx-react';
 import * as portals from 'react-reverse-portal';
 
-import { UiStore } from '../../../model/ui-store';
+import { UiStore } from '../../../model/ui/ui-store';
 import { AccountStore } from '../../../model/account/account-store';
 import { RTCConnection } from '../../../model/webrtc/rtc-connection';
 import { RTCDataChannel } from '../../../model/webrtc/rtc-data-channel';
 import { RTCMediaTrack } from '../../../model/webrtc/rtc-media-track';
 
-import { ThemedSelfSizedEditor } from '../../editor/base-editor';
+import { SelfSizedEditor } from '../../editor/base-editor';
 import { PaneOuterContainer, PaneScrollContainer } from '../view-details-pane';
 
 import { RTCConnectionCard } from './rtc-connection-card';
@@ -28,8 +28,8 @@ import { RTCMediaCard } from './rtc-media-card';
 export class RTCConnectionDetailsPane extends React.Component<{
     connection: RTCConnection,
 
-    offerEditor: portals.HtmlPortalNode<typeof ThemedSelfSizedEditor>,
-    answerEditor: portals.HtmlPortalNode<typeof ThemedSelfSizedEditor>,
+    offerEditor: portals.HtmlPortalNode<typeof SelfSizedEditor>,
+    answerEditor: portals.HtmlPortalNode<typeof SelfSizedEditor>,
 
     navigate: (path: string) => void,
 
@@ -51,7 +51,7 @@ export class RTCConnectionDetailsPane extends React.Component<{
 
     // Create a editor portal node for every data channel.
     private readonly dataChannelEditors = this.dataChannels.map(() =>
-        portals.createHtmlPortalNode<typeof ThemedSelfSizedEditor>()
+        portals.createHtmlPortalNode<typeof SelfSizedEditor>()
     );
 
     @observable
@@ -95,12 +95,12 @@ export class RTCConnectionDetailsPane extends React.Component<{
         const offerCardProps = {
             ...uiStore!.viewCardProps.rtcSessionOffer,
             direction: locallyInitiated ? 'right' : 'left'
-        };
+        } as const;
 
         const answerCardProps = {
             ...uiStore!.viewCardProps.rtcSessionAnswer,
             direction: locallyInitiated ? 'left' : 'right'
-        };
+        } as const;
 
         return <PaneOuterContainer>
             <PaneScrollContainer>
@@ -136,6 +136,7 @@ export class RTCConnectionDetailsPane extends React.Component<{
                             collapsed={!!this.streamCardState[mediaTrack.id]?.collapsed}
                             onCollapseToggled={this.toggleCollapse.bind(this, mediaTrack.id)}
                             onExpandToggled={this.expandStream.bind(this, mediaTrack.id)}
+                            ariaLabel='RTC Media Stream Section'
                         />
                     )
                 }
@@ -152,13 +153,14 @@ export class RTCConnectionDetailsPane extends React.Component<{
                             collapsed={!!this.streamCardState[dataChannel.id]?.collapsed}
                             onCollapseToggled={this.toggleCollapse.bind(this, dataChannel.id)}
                             onExpandToggled={this.expandStream.bind(this, dataChannel.id)}
+                            ariaLabel='RTC Data Messages Section'
                         />
                     )
                 }
 
                 { this.dataChannelEditors.map((node, i) =>
                     <portals.InPortal key={i} node={node}>
-                        <ThemedSelfSizedEditor
+                        <SelfSizedEditor
                             contentId={null}
                         />
                     </portals.InPortal>

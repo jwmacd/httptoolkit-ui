@@ -1,29 +1,24 @@
 import * as _ from 'lodash';
 import * as React from 'react';
-import { action } from 'mobx';
+import { action, computed } from 'mobx';
 import { observer, inject } from 'mobx-react';
 import * as portals from 'react-reverse-portal';
 
 import { CollectedEvent, HtkResponse, HttpExchange } from '../../../types';
 import { styled } from '../../../styles';
-import { reportError } from '../../../errors';
+import { logError } from '../../../errors';
 
-import { UiStore } from '../../../model/ui-store';
+import { ExpandableViewCardKey, UiStore } from '../../../model/ui/ui-store';
 import { RulesStore } from '../../../model/rules/rules-store';
 import { AccountStore } from '../../../model/account/account-store';
-import { getStatusColor } from '../../../model/events/categorization';
 import { ApiExchange } from '../../../model/api/api-interfaces';
 import { buildRuleFromRequest } from '../../../model/rules/rule-creation';
+import { findItem } from '../../../model/rules/rules-structure';
+import { HtkRule, getRulePartKey } from '../../../model/rules/rules';
 import { WebSocketStream } from '../../../model/websockets/websocket-stream';
+import { tagsToErrorType } from '../../../model/http/error-types';
 
-import { Pill } from '../../common/pill';
-import { CollapsibleCard, CollapsibleCardHeading } from '../../common/card';
-
-import {
-    PaneOuterContainer,
-    PaneScrollContainer,
-    ExpandedPaneContentContainer
-} from '../view-details-pane';
+import { PaneOuterContainer, PaneScrollContainer } from '../view-details-pane';
 import { StreamMessageListCard } from '../stream-message-list-card';
 import { WebSocketCloseCard } from '../websocket-close-card';
 
@@ -31,10 +26,12 @@ import { HttpBodyCard } from './http-body-card';
 import { HttpApiCard, HttpApiPlaceholderCard } from './http-api-card';
 import { HttpRequestCard } from './http-request-card';
 import { HttpResponseCard } from './http-response-card';
+import { HttpAbortedResponseCard } from './http-aborted-card';
+import { HttpTrailersCard } from './http-trailers-card';
 import { HttpPerformanceCard } from './http-performance-card';
 import { HttpExportCard } from './http-export-card';
-import { ThemedSelfSizedEditor } from '../../editor/base-editor';
-import { HttpErrorHeader, tagsToErrorType } from './http-error-header';
+import { SelfSizedEditor } from '../../editor/base-editor';
+import { HttpErrorHeader } from './http-error-header';
 import { HttpDetailsFooter } from './http-details-footer';
 import { HttpRequestBreakpointHeader, HttpResponseBreakpointHeader } from './http-breakpoint-header';
 import { HttpBreakpointRequestCard } from './http-breakpoint-request-card';
@@ -65,13 +62,15 @@ const makeFriendlyApiName = (rawName: string) => {
 export class HttpDetailsPane extends React.Component<{
     exchange: HttpExchange,
 
-    requestEditor: portals.HtmlPortalNode<typeof ThemedSelfSizedEditor>,
-    responseEditor: portals.HtmlPortalNode<typeof ThemedSelfSizedEditor>,
-    streamMessageEditor: portals.HtmlPortalNode<typeof ThemedSelfSizedEditor>,
+    requestEditor: portals.HtmlPortalNode<typeof SelfSizedEditor>,
+    responseEditor: portals.HtmlPortalNode<typeof SelfSizedEditor>,
+    streamMessageEditor: portals.HtmlPortalNode<typeof SelfSizedEditor>,
 
     navigate: (path: string) => void,
     onDelete: (event: CollectedEvent) => void,
     onScrollToEvent: (event: CollectedEvent) => void,
+    onBuildRuleFromExchange: (exchange: HttpExchange) => void,
+    onPrepareToResendRequest?: (exchange: HttpExchange) => void,
 
     // Injected:
     uiStore?: UiStore,
@@ -88,16 +87,15 @@ export class HttpDetailsPane extends React.Component<{
             exchange,
             onDelete,
             onScrollToEvent,
+            onBuildRuleFromExchange,
+            onPrepareToResendRequest,
             uiStore,
             accountStore,
             navigate
         } = this.props;
 
         const { isPaidUser } = accountStore!;
-        const {
-            expandedCard,
-            expandCompleted
-        } = uiStore!;
+        const { expandedViewCard } = uiStore!;
         const { requestBreakpoint, responseBreakpoint } = exchange;
 
         // The full API details - for paid APIs, and non-paid users, we don't show
@@ -116,11 +114,11 @@ export class HttpDetailsPane extends React.Component<{
 
         const headerCard = this.renderHeaderCard(exchange);
 
-        if (expandedCard) {
-            return <ExpandedPaneContentContainer expandCompleted={expandCompleted}>
+        if (expandedViewCard) {
+            return <PaneOuterContainer>
                 { headerCard }
-                { this.renderExpandedCard(expandedCard, exchange, apiExchange) }
-            </ExpandedPaneContentContainer>;
+                { this.renderExpandedCard(expandedViewCard, exchange, apiExchange) }
+            </PaneOuterContainer>;
         }
 
         const cards = (requestBreakpoint || responseBreakpoint)
@@ -136,6 +134,8 @@ export class HttpDetailsPane extends React.Component<{
                 event={exchange}
                 onDelete={onDelete}
                 onScrollToEvent={onScrollToEvent}
+                onBuildRuleFromExchange={onBuildRuleFromExchange}
+                onPrepareToResendRequest={onPrepareToResendRequest}
                 navigate={navigate}
                 isPaidUser={isPaidUser}
             />
@@ -174,13 +174,13 @@ export class HttpDetailsPane extends React.Component<{
             isPaidUser,
             getPro,
             navigate,
-            mockRequest: this.mockRequest,
+            createRuleFromRequest: this.createRuleFromRequest,
             ignoreError: this.ignoreError
         };
 
         const errorType = tagsToErrorType(tags);
 
-        if (errorType) {
+        if (errorType && !exchange.hideErrors) {
             return <HttpErrorHeader type={errorType} {...errorHeaderProps} />;
         } else {
             return null;
@@ -211,7 +211,7 @@ export class HttpDetailsPane extends React.Component<{
     }
 
     private renderExpandedCard(
-        expandedCard: 'requestBody' | 'responseBody' | 'webSocketMessages',
+        expandedCard: ExpandableViewCardKey,
         exchange: HttpExchange,
         apiExchange: ApiExchange | undefined
     ) {
@@ -230,7 +230,7 @@ export class HttpDetailsPane extends React.Component<{
         ) {
             return this.renderWebSocketMessages(exchange);
         } else {
-            reportError(`Expanded ${expandedCard}, but can't show anything`);
+            logError(`Expanded ${expandedCard}, but can't show anything`);
             return null; // Shouldn't ever happen, unless we get into a funky broken state
         }
     }
@@ -259,6 +259,8 @@ export class HttpDetailsPane extends React.Component<{
             cards.push(this.renderApiCard(apiName, apiExchange));
             cards.push(<HttpRequestCard
                 {...this.cardProps.request}
+                matchedRuleData={this.matchedRuleData}
+                onRuleClicked={this.jumpToRule}
                 exchange={exchange}
             />);
 
@@ -293,6 +295,8 @@ export class HttpDetailsPane extends React.Component<{
 
         cards.push(<HttpRequestCard
             {...this.cardProps.request}
+            matchedRuleData={this.matchedRuleData}
+            onRuleClicked={this.jumpToRule}
             exchange={exchange}
         />);
 
@@ -300,21 +304,26 @@ export class HttpDetailsPane extends React.Component<{
             cards.push(this.renderRequestBody(exchange, apiExchange));
         }
 
+        if (exchange.request.rawTrailers?.length) {
+            cards.push(<HttpTrailersCard
+                {...this.cardProps.requestTrailers}
+                type='request'
+                httpVersion={exchange.httpVersion}
+                requestUrl={exchange.request.parsedUrl}
+                trailers={exchange.request.rawTrailers}
+            />);
+        }
+
         if (response === 'aborted') {
-            cards.push(<CollapsibleCard {...this.cardProps.response} direction='left'>
-                <header>
-                    <Pill color={getStatusColor(response, uiStore!.theme)}>Aborted</Pill>
-                    <CollapsibleCardHeading onCollapseToggled={this.cardProps.response.onCollapseToggled}>
-                        Response
-                    </CollapsibleCardHeading>
-                </header>
-                <div>
-                    The request was aborted before the response was completed.
-                </div>
-            </CollapsibleCard>);
+            cards.push(<HttpAbortedResponseCard
+                key={this.cardProps.response.key}
+                cardProps={this.cardProps.response}
+                exchange={exchange}
+            />);
         } else if (!!response) {
             cards.push(<HttpResponseCard
                 {...this.cardProps.response}
+                httpVersion={exchange.httpVersion}
                 response={response}
                 requestUrl={exchange.request.parsedUrl}
                 apiExchange={apiExchange}
@@ -324,20 +333,33 @@ export class HttpDetailsPane extends React.Component<{
             if (exchange.hasResponseBody()) {
                 cards.push(this.renderResponseBody(exchange, apiExchange));
             }
-        }
 
-        if (exchange.isWebSocket() && exchange.wasAccepted()) {
-            cards.push(this.renderWebSocketMessages(exchange));
-
-            if (exchange.closeState) {
-                cards.push(<WebSocketCloseCard
-                    {...this.cardProps.webSocketClose}
-                    theme={uiStore!.theme}
-                    closeState={exchange.closeState}
+            if (exchange.isSuccessfulExchange() && exchange.response?.rawTrailers?.length) {
+                cards.push(<HttpTrailersCard
+                    {...this.cardProps.responseTrailers}
+                    type='response'
+                    httpVersion={exchange.httpVersion}
+                    requestUrl={exchange.request.parsedUrl}
+                    trailers={exchange.response.rawTrailers}
                 />);
             }
-        } else {
-            // We only show performance & export for non-websockets, for now:
+        }
+
+        if (exchange.isWebSocket()) {
+            if (exchange.wasAccepted()) {
+                cards.push(this.renderWebSocketMessages(exchange));
+
+                if (exchange.closeState) {
+                    cards.push(<WebSocketCloseCard
+                        {...this.cardProps.webSocketClose}
+                        theme={uiStore!.theme}
+                        closeState={exchange.closeState}
+                    />);
+                }
+            }
+        } else if (!exchange.tags.some(tag => tag.startsWith('client-error:'))) {
+            // We show perf & export only for valid requests, and never for
+            // websockets (at least for now):
 
             // Push all cards below this point to the bottom
             cards.push(<CardDivider key='divider' />);
@@ -363,8 +385,8 @@ export class HttpDetailsPane extends React.Component<{
             ? <HttpBreakpointBodyCard
                 {...this.requestBodyParams()}
                 exchangeId={exchange.id}
-                body={requestBreakpoint.inProgressResult.body.decoded}
-                headers={requestBreakpoint.inProgressResult.headers}
+                body={requestBreakpoint.inProgressResult.body}
+                rawHeaders={requestBreakpoint.inProgressResult.rawHeaders}
                 onChange={requestBreakpoint.updateBody}
             />
             : <HttpBodyCard
@@ -383,8 +405,8 @@ export class HttpDetailsPane extends React.Component<{
             ? <HttpBreakpointBodyCard
                 {...this.responseBodyParams()}
                 exchangeId={exchange.id}
-                body={responseBreakpoint.inProgressResult.body.decoded}
-                headers={responseBreakpoint.inProgressResult.headers}
+                body={responseBreakpoint.inProgressResult.body}
+                rawHeaders={responseBreakpoint.inProgressResult.rawHeaders}
                 onChange={responseBreakpoint.updateBody}
             />
             : <HttpBodyCard
@@ -441,25 +463,50 @@ export class HttpDetailsPane extends React.Component<{
     }
 
     @action.bound
-    private mockRequest() {
+    private createRuleFromRequest() {
         const { exchange, rulesStore, navigate } = this.props;
 
         const rule = buildRuleFromRequest(rulesStore!, exchange.request);
         rulesStore!.draftRules.items.unshift(rule);
-        navigate(`/mock/${rule.id}`);
+        navigate(`/modify/${rule.id}`);
+    }
+
+    @computed
+    private get matchedRuleData() {
+        const { exchange, rulesStore } = this.props;
+
+        const { matchedRule } = exchange;
+        if (!matchedRule) return;
+
+        const currentRuleDraft = findItem(rulesStore!.draftRules, { id: matchedRule.id }) as HtkRule | undefined;
+        if (!currentRuleDraft) {
+            return { stepTypes: matchedRule.handlerStepTypes, status: 'deleted' } as const;
+        }
+
+        const currentStepTypes = ('handler' in currentRuleDraft
+            ? [currentRuleDraft.handler]
+            : currentRuleDraft.steps
+        ).map(s => getRulePartKey(s));
+
+        if (!_.isEqual(currentStepTypes, matchedRule.handlerStepTypes)) {
+            return { stepTypes: matchedRule.handlerStepTypes, status: 'modified-types' } as const;
+        }
+
+        return { stepTypes: matchedRule.handlerStepTypes, status: 'unchanged' } as const;
+    }
+
+    @action.bound
+    private jumpToRule() {
+        const { navigate, exchange } = this.props;
+        const { matchedRule } = exchange;
+        if (!matchedRule) return;
+        navigate(`/modify/${matchedRule.id}`);
     }
 
     @action.bound
     private ignoreError() {
         const { exchange } = this.props;
-
-        // Drop all error tags from this exchange
-        exchange.tags = exchange.tags.filter(t =>
-            !t.startsWith('passthrough-error:') &&
-            !t.startsWith('passthrough-tls-error:') &&
-            !t.startsWith('client-error:') &&
-            !['header-overflow', 'http-2'].includes(t)
-        );
+        exchange.hideErrors = true;
     }
 
 };

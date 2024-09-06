@@ -2,27 +2,29 @@ import { styled } from '../../styles';
 
 import { ViewableContentType } from '../events/content-types';
 import { ObservablePromise, observablePromise } from '../../util/observable';
+import { bufferToString, bufferToHex } from '../../util/buffer';
 
 import type { WorkerFormatterKey } from '../../services/ui-worker-formatters';
 import { formatBufferAsync } from '../../services/ui-worker-api';
 import { ReadOnlyParams } from '../../components/common/editable-params';
+import { ImageViewer } from '../../components/editor/image-viewer';
 
 export interface EditorFormatter {
     language: string;
     cacheKey: Symbol;
+    isEditApplicable: boolean; // Can you apply this manually during editing to format an input?
     render(content: Buffer): string | ObservablePromise<string>;
 }
 
 type FormatComponentProps = {
-    expanded: boolean,
-    content: Buffer,
-    rawContentType: string | undefined
+    content: Buffer;
+    rawContentType: string | undefined;
 };
 
-type FormatComponent = React.ComponentType<FormatComponentProps>;;
+type FormatComponent = React.ComponentType<FormatComponentProps>;
 
 type FormatComponentConfig = {
-    scrollable?: true;
+    layout: 'scrollable' | 'centered';
     Component: FormatComponent;
 };
 
@@ -41,15 +43,13 @@ export const Formatters: { [key in ViewableContentType]: Formatter } = {
     raw: {
         language: 'text',
         cacheKey: Symbol('raw'),
+        isEditApplicable: false,
         render: (input: Buffer) => {
             if (input.byteLength < 2000) {
                 try {
                     // For short-ish inputs, we return synchronously - conveniently this avoids
                     // showing the loading spinner that churns the layout in short content cases.
-                    return input.toString('hex')
-                        .replace(/(\w\w)/g, '$1 ')
-                        .trimRight();
-                        // ^ Same logic as in UI-worker-formatter
+                    return bufferToHex(input);
                 } catch (e) {
                     return observablePromise(Promise.reject(e));
                 }
@@ -63,41 +63,48 @@ export const Formatters: { [key in ViewableContentType]: Formatter } = {
     text: {
         language: 'text',
         cacheKey: Symbol('text'),
+        isEditApplicable: false,
         render: (input: Buffer) => {
-            return input.toString('utf8');
+            return bufferToString(input);
         }
     },
     base64: {
         language: 'text',
         cacheKey: Symbol('base64'),
+        isEditApplicable: false,
         render: buildAsyncRenderer('base64')
     },
     markdown: {
         language: 'markdown',
         cacheKey: Symbol('markdown'),
+        isEditApplicable: false,
         render: buildAsyncRenderer('markdown')
     },
     yaml: {
         language: 'yaml',
         cacheKey: Symbol('yaml'),
+        isEditApplicable: false,
         render: buildAsyncRenderer('yaml')
     },
     html: {
         language: 'html',
         cacheKey: Symbol('html'),
+        isEditApplicable: true,
         render: buildAsyncRenderer('html')
     },
     xml: {
         language: 'xml',
         cacheKey: Symbol('xml'),
+        isEditApplicable: true,
         render: buildAsyncRenderer('xml')
     },
     json: {
         language: 'json',
         cacheKey: Symbol('json'),
+        isEditApplicable: true,
         render: (input: Buffer) => {
-            if (input.byteLength < 2000) {
-                const inputAsString = input.toString('utf8')
+            if (input.byteLength < 10000) {
+                const inputAsString = bufferToString(input);
 
                 try {
                     // For short-ish inputs, we return synchronously - conveniently this avoids
@@ -120,36 +127,37 @@ export const Formatters: { [key in ViewableContentType]: Formatter } = {
     javascript: {
         language: 'javascript',
         cacheKey: Symbol('javascript'),
+        isEditApplicable: true,
         render: buildAsyncRenderer('javascript')
     },
     css: {
         language: 'css',
         cacheKey: Symbol('css'),
+        isEditApplicable: true,
         render: buildAsyncRenderer('css')
     },
+    protobuf: {
+        language: 'protobuf',
+        cacheKey: Symbol('protobuf'),
+        isEditApplicable: false,
+        render: buildAsyncRenderer('protobuf')
+    },
+    'grpc-proto': {
+        language: 'protobuf',
+        cacheKey: Symbol('grpc-proto'),
+        isEditApplicable: false,
+        render: buildAsyncRenderer('grpc-proto')
+    },
     'url-encoded': {
-        scrollable: true,
+        layout: 'scrollable',
         Component: styled(ReadOnlyParams).attrs((p: FormatComponentProps) => ({
-            content: p.content.toString('utf8')
+            content: bufferToString(p.content)
         }))`
             padding: 5px;
         ` as FormatComponent
     },
     image: {
-        Component: styled.img.attrs((p: FormatComponentProps) => ({
-            src: `data:${p.rawContentType || ''};base64,${p.content.toString('base64')}`
-        }))`
-            display: block;
-            max-width: 100%;
-            margin: 0 auto;
-
-            ${(p: FormatComponentProps) => p.expanded && `
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                max-height: 100%;
-            `}
-        `
+        layout: 'centered',
+        Component: ImageViewer
     }
 };

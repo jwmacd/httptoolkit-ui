@@ -1,13 +1,23 @@
 import * as React from 'react';
 import { useHotkeys as rawUseHotkeys } from "react-hotkeys-hook";
+import { action, observable } from 'mobx';
 
 import { desktopVersion } from '../services/service-versions';
 import { getDeferred, delay } from './promise';
-import { reportError } from '../errors';
+import { logError } from '../errors';
 
 export function isReactElement(node: any): node is React.ReactElement {
     return node && !!node.$$typeof;
 }
+
+export const windowSize = observable({
+    height: window.innerHeight,
+    width: window.innerWidth
+});
+window.addEventListener('resize', action(() => {
+    windowSize.height = window.innerHeight;
+    windowSize.width = window.innerWidth;
+}));
 
 export const Ctrl = navigator.platform.startsWith('Mac')
     ? '⌘'
@@ -67,6 +77,8 @@ export function uploadFile(type: 'arraybuffer', acceptedMimeTypes?: string[]): P
 export function uploadFile(type: 'text', acceptedMimeTypes?: string[]): Promise<string | null>;
 // Ask the user for a file of one of the given types, and get the file path itself (electron only)
 export function uploadFile(type: 'path', acceptedMimeTypes?: string[]): Promise<string | null>;
+// Note that in general, in most cases this will not resolve when the picker is cancelled (instead,
+// it'll only resolve as null after a 10 minute time out) so handle accordingly!
 export function uploadFile(
     type: FileReaderType = 'arraybuffer',
     acceptedMimeTypes: string[] = []
@@ -99,7 +111,11 @@ export function uploadFile(
 
     fileInput.addEventListener('change', () => {
         if (!fileInput.files || !fileInput.files.length) {
-            return Promise.resolve(null);
+            // This remains as a backup for cases where this could happen (unclear) but
+            // in modern browsers it seems we don't get a change event at all for cancel,
+            // and there are no reliable workarounds (monitoring focus doesn't help -
+            // pickers are seemingly no longer modal). Assume cancel never resolves.
+            return result.resolve(null);
         }
 
         const file = fileInput.files[0];
@@ -150,18 +166,51 @@ export function useSize(ref: React.RefObject<HTMLElement>, defaultValue: number)
             if (container) {
                 setSpaceAvailable(container.clientWidth);
             } else {
-                reportError("Element resized, but no ref available");
+                console.warn("Element resized, but no ref available");
             }
         });
 
         if (ref.current) {
             resizeObserver.observe(ref.current);
         } else {
-            reportError("No element to observe for resizing!");
+            logError("No element to observe for resizing!");
         }
 
         return () => resizeObserver.disconnect();
     }, []);
 
     return spaceAvailable;
+}
+
+export async function copyToClipboard(textToCopy: string) {
+    if (navigator.clipboard) {
+        // This will be available on secure domains in supported browsers. It requires
+        // permissions, but not during Electron usage. We ignore permissions here -
+        // if this fails (on secure web usage outside Electron) we'll use the fallback.
+        try {
+            await navigator.clipboard.writeText(textToCopy);
+            return; // If this succeeds, we're done
+        } catch (e) {
+            console.warn('Copy to clipboard with navigator.clipboard failed', e);
+            // Didn't succeed - keep going
+        }
+    }
+
+    // This should work everywhere, as long as this method is called from an
+    // event handler:
+    const textArea = document.createElement("textarea");
+    try {
+        textArea.value = textToCopy;
+        textArea.style.position = "absolute";
+        textArea.style.left = "-9999px";
+
+        document.body.prepend(textArea);
+        textArea.select();
+        document.execCommand('copy');
+    } catch (e) {
+        console.warn('Copy to clipboard fallback failed', e);
+        throw e;
+    } finally {
+        textArea.remove();
+    }
 }

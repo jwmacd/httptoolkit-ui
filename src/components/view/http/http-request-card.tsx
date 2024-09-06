@@ -1,18 +1,24 @@
 import * as React from 'react';
-import { observer } from 'mobx-react';
+import { inject, observer } from 'mobx-react';
 
 import { HttpExchange, HtkRequest } from '../../../types';
 import { styled } from '../../../styles';
+import { PhosphorIcon } from '../../../icons';
 
-import { getSummaryColour } from '../../../model/events/categorization';
+import { aOrAn, uppercaseFirst } from '../../../util/text';
+
+import { UiStore } from '../../../model/ui/ui-store';
+import { getSummaryColor } from '../../../model/events/categorization';
 import { getMethodDocs } from '../../../model/http/http-docs';
+import { nameHandlerClass } from '../../../model/rules/rule-descriptions';
+import { HandlerClassKey } from '../../../model/rules/rules';
 
 import {
     CollapsibleCardHeading,
     CollapsibleCard,
     CollapsibleCardProps
 } from '../../common/card';
-import { Pill } from '../../common/pill';
+import { Pill, PillButton } from '../../common/pill';
 import {
     CollapsibleSection,
     CollapsibleSectionSummary,
@@ -26,10 +32,66 @@ import {
 } from '../../common/text-content';
 import { DocsLink } from '../../common/docs-link';
 import { SourceIcon } from '../../common/source-icon';
+import { HttpVersionPill } from '../../common/http-version-pill';
 import { HeaderDetails } from './header-details';
 import { UrlBreakdown } from '../url-breakdown';
 
-const RawRequestDetails = (p: { request: HtkRequest }) => {
+const MatchedRulePill = styled(inject('uiStore')((p: {
+    className?: string,
+    uiStore?: UiStore,
+    ruleData: {
+        stepTypes: HandlerClassKey[],
+        status: 'unchanged' | 'modified-types' | 'deleted'
+    },
+    onClick: () => void
+}) => {
+    const { stepTypes } = p.ruleData;
+    const stepDescription = stepTypes.length !== 1
+        ? 'multi-step'
+        : nameHandlerClass(stepTypes[0]);
+
+    return <PillButton
+        color={getSummaryColor('mutative')} // Conceptually similar - we've modified traffic
+        className={p.className}
+
+        // For now we show modified as unchanged, but we could highlight this later:
+        disabled={p.ruleData.status === 'deleted'}
+        onClick={p.ruleData.status !== 'deleted' ? p.onClick : undefined}
+
+        title={
+            `This request was handled by ${
+                aOrAn(stepDescription)
+             } ${stepDescription} rule${
+                p.ruleData.status === 'deleted'
+                    ? ' which has since been deleted'
+                : p.ruleData.status === 'modified-types'
+                    ? ' (which has since been modified)'
+                : ''
+            }.${
+                p.ruleData.status !== 'deleted'
+                    ? '\nClick here to jump to the rule on the Modify page.'
+                    : ''
+            }`
+        }
+    >
+        <PhosphorIcon icon='Pencil' size='16px' />
+        { uppercaseFirst(stepDescription) }
+    </PillButton>;
+}))`
+    margin-right: auto;
+
+    text-decoration: none;
+    word-spacing: 0;
+
+    > svg {
+        margin: -1px 5px 0 -1px;
+    }
+`;
+
+const RawRequestDetails = (p: {
+    request: HtkRequest,
+    httpVersion: 1 | 2
+}) => {
     const methodDocs = getMethodDocs(p.request.method);
     const methodDetails = [
         methodDocs && <Markdown
@@ -75,22 +137,43 @@ const RawRequestDetails = (p: { request: HtkRequest }) => {
         </CollapsibleSection>
 
         <ContentLabelBlock>Headers</ContentLabelBlock>
-        <HeaderDetails headers={p.request.headers} requestUrl={p.request.parsedUrl} />
+        <HeaderDetails
+            httpVersion={p.httpVersion}
+            headers={p.request.rawHeaders}
+            requestUrl={p.request.parsedUrl}
+        />
     </div>;
 }
 
 interface HttpRequestCardProps extends CollapsibleCardProps {
     exchange: HttpExchange;
+    matchedRuleData: {
+        stepTypes: HandlerClassKey[],
+        status: 'unchanged' | 'modified-types' | 'deleted'
+    } | undefined;
+    onRuleClicked: () => void;
 }
 
 export const HttpRequestCard = observer((props: HttpRequestCardProps) => {
-    const { exchange } = props;
+    const { exchange, matchedRuleData, onRuleClicked } = props;
     const { request } = exchange;
+
+    // We consider passthrough as a no-op, and so don't show anything in that case.
+    const noopRule = matchedRuleData?.stepTypes.every(
+        type => type === 'passthrough' || type === 'ws-passthrough'
+    )
 
     return <CollapsibleCard {...props} direction='right'>
         <header>
+            { matchedRuleData && !noopRule &&
+                <MatchedRulePill
+                    ruleData={matchedRuleData}
+                    onClick={onRuleClicked}
+                />
+            }
             <SourceIcon source={request.source} />
-            <Pill color={getSummaryColour(exchange)}>
+            <HttpVersionPill request={request} />
+            <Pill color={getSummaryColor(exchange)}>
                 { exchange.isWebSocket() ? 'WebSocket ' : '' }
                 { request.method } {
                     (request.hostname || '')
@@ -103,6 +186,9 @@ export const HttpRequestCard = observer((props: HttpRequestCardProps) => {
             </CollapsibleCardHeading>
         </header>
 
-        <RawRequestDetails request={request} />
+        <RawRequestDetails
+            request={request}
+            httpVersion={exchange.httpVersion}
+        />
     </CollapsibleCard>;
 });

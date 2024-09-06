@@ -14,25 +14,33 @@ import { observer, disposeOnUnmount, inject } from 'mobx-react';
 import * as portals from 'react-reverse-portal';
 
 import { WithInjected, CollectedEvent } from '../../types';
-import { styled } from '../../styles';
-import { useHotkeys, isEditable } from '../../util/ui';
+import { NARROW_LAYOUT_BREAKPOINT, styled } from '../../styles';
+import { useHotkeys, isEditable, windowSize } from '../../util/ui';
 import { debounceComputed } from '../../util/observable';
 import { UnreachableCheck } from '../../util/error';
 
-import { UiStore } from '../../model/ui-store';
+import { SERVER_SEND_API_SUPPORTED, serverVersion, versionSatisfies } from '../../services/service-versions';
+
+import { UiStore } from '../../model/ui/ui-store';
 import { ProxyStore } from '../../model/proxy-store';
 import { EventsStore } from '../../model/events/events-store';
+import { RulesStore } from '../../model/rules/rules-store';
+import { AccountStore } from '../../model/account/account-store';
+import { SendStore } from '../../model/send/send-store';
 import { HttpExchange } from '../../model/http/exchange';
 import { FilterSet } from '../../model/filters/search-filters';
+import { buildRuleFromExchange } from '../../model/rules/rule-creation';
 
 import { SplitPane } from '../split-pane';
 import { EmptyState } from '../common/empty-state';
-import { ThemedSelfSizedEditor } from '../editor/base-editor';
+import { SelfSizedEditor } from '../editor/base-editor';
 
 import { ViewEventList } from './view-event-list';
 import { ViewEventListFooter } from './view-event-list-footer';
+import { ViewEventContextMenuBuilder } from './view-context-menu-builder';
 import { HttpDetailsPane } from './http/http-details-pane';
-import { TlsFailureDetailsPane } from './tls-failure-details-pane';
+import { TlsFailureDetailsPane } from './tls/tls-failure-details-pane';
+import { TlsTunnelDetailsPane } from './tls/tls-tunnel-details-pane';
 import { RTCDataChannelDetailsPane } from './rtc/rtc-data-channel-details-pane';
 import { RTCMediaDetailsPane } from './rtc/rtc-media-details-pane';
 import { RTCConnectionDetailsPane } from './rtc/rtc-connection-details-pane';
@@ -42,18 +50,26 @@ interface ViewPageProps {
     eventsStore: EventsStore;
     proxyStore: ProxyStore;
     uiStore: UiStore;
+    accountStore: AccountStore;
+    rulesStore: RulesStore;
+    sendStore: SendStore;
     navigate: (path: string) => void;
     eventId?: string;
 }
 
 const ViewPageKeyboardShortcuts = (props: {
+    isPaidUser: boolean,
     selectedEvent: CollectedEvent | undefined,
     moveSelection: (distance: number) => void,
     onPin: (event: HttpExchange) => void,
+    onResend: (event: HttpExchange) => void,
+    onBuildRuleFromExchange: (event: HttpExchange) => void,
     onDelete: (event: CollectedEvent) => void,
     onClear: () => void,
     onStartSearch: () => void
 }) => {
+    const selectedEvent = props.selectedEvent;
+
     useHotkeys('j', (event) => {
         if (isEditable(event.target)) return;
         props.moveSelection(1);
@@ -65,19 +81,33 @@ const ViewPageKeyboardShortcuts = (props: {
     }, [props.moveSelection]);
 
     useHotkeys('Ctrl+p, Cmd+p', (event) => {
-        if (props.selectedEvent?.isHttp()) {
-            props.onPin(props.selectedEvent);
+        if (selectedEvent?.isHttp()) {
+            props.onPin(selectedEvent);
             event.preventDefault();
         }
-    }, [props.selectedEvent, props.onPin]);
+    }, [selectedEvent, props.onPin]);
+
+    useHotkeys('Ctrl+r, Cmd+r', (event) => {
+        if (props.isPaidUser && selectedEvent?.isHttp() && !selectedEvent?.isWebSocket()) {
+            props.onResend(selectedEvent);
+            event.preventDefault();
+        }
+    }, [selectedEvent, props.onResend, props.isPaidUser]);
+
+    useHotkeys('Ctrl+m, Cmd+m', (event) => {
+        if (props.isPaidUser && selectedEvent?.isHttp() && !selectedEvent?.isWebSocket()) {
+            props.onBuildRuleFromExchange(selectedEvent);
+            event.preventDefault();
+        }
+    }, [selectedEvent, props.onBuildRuleFromExchange, props.isPaidUser]);
 
     useHotkeys('Ctrl+Delete, Cmd+Delete', (event) => {
         if (isEditable(event.target)) return;
 
-        if (props.selectedEvent) {
-            props.onDelete(props.selectedEvent);
+        if (selectedEvent) {
+            props.onDelete(selectedEvent);
         }
-    }, [props.selectedEvent, props.onDelete]);
+    }, [selectedEvent, props.onDelete]);
 
     useHotkeys('Ctrl+Shift+Delete, Cmd+Shift+Delete', (event) => {
         props.onClear();
@@ -102,14 +132,26 @@ type EditorKey = typeof EDITOR_KEYS[number];
 @inject('eventsStore')
 @inject('proxyStore')
 @inject('uiStore')
+@inject('accountStore')
+@inject('rulesStore')
+@inject('sendStore')
 @observer
 class ViewPage extends React.Component<ViewPageProps> {
 
+    @computed
+    private get splitDirection(): 'vertical' | 'horizontal' {
+        if (windowSize.width >= NARROW_LAYOUT_BREAKPOINT) {
+            return 'vertical';
+        } else {
+            return 'horizontal';
+        }
+    }
+
     private readonly editors = EDITOR_KEYS.reduce((v, key) => ({
         ...v,
-        [key]: portals.createHtmlPortalNode<typeof ThemedSelfSizedEditor>()
+        [key]: portals.createHtmlPortalNode<typeof SelfSizedEditor>()
     }), {} as {
-        [K in EditorKey]: portals.HtmlPortalNode<typeof ThemedSelfSizedEditor>
+        [K in EditorKey]: portals.HtmlPortalNode<typeof SelfSizedEditor>
     });
 
     searchInputRef = React.createRef<HTMLInputElement>();
@@ -155,10 +197,43 @@ class ViewPage extends React.Component<ViewPageProps> {
         });
     }
 
+    private readonly contextMenuBuilder = new ViewEventContextMenuBuilder(
+        this.props.accountStore,
+        this.props.uiStore,
+        this.onPin,
+        this.onDelete,
+        this.onBuildRuleFromExchange,
+        this.onPrepareToResendRequest
+    );
+
     componentDidMount() {
+        // After first render, scroll to the selected event (or the end of the list) by default:
+        requestAnimationFrame(() => {
+            if (this.props.eventId && this.selectedEvent) {
+                this.onScrollToCenterEvent(this.selectedEvent);
+            } else {
+                this.onScrollToEnd();
+            }
+        });
+
+        disposeOnUnmount(this, observe(this, 'selectedEvent', ({ oldValue, newValue }) => {
+            if (this.splitDirection !== 'horizontal') return;
+
+            // In horizontal mode, the details pane appears and disappears, so we need to do some
+            // tricks to stop the scroll position in the list doing confusing things.
+
+            if (!oldValue && newValue) {
+                // If we're bringing the details pane into view, we want to jump to where we were
+                // but then shift slightly to make sure the selected row is visible too.
+                setTimeout(() => {
+                    if (!this.selectedEvent) return;
+                    this.listRef.current?.scrollToEvent(this.selectedEvent);
+                }, 50); // We need to delay slightly to let DOM and then UI state catch up
+            }
+        }));
+
         disposeOnUnmount(this, autorun(() => {
             if (!this.props.eventId) return;
-
             const selectedEvent = this.selectedEvent;
 
             // If you somehow have a non-existent event selected, unselect it
@@ -167,31 +242,31 @@ class ViewPage extends React.Component<ViewPageProps> {
                 return;
             }
 
-            const { expandedCard } = this.props.uiStore;
+            const { expandedViewCard } = this.props.uiStore;
 
-            if (!expandedCard) return;
+            if (!expandedViewCard) return;
 
             // If you have a pane expanded, and select an event with no data
             // for that pane, then disable the expansion
             if (
                 !(selectedEvent.isHttp()) ||
                 (
-                    expandedCard === 'requestBody' &&
+                    expandedViewCard === 'requestBody' &&
                     !selectedEvent.hasRequestBody() &&
                     !selectedEvent.requestBreakpoint
                 ) ||
                 (
-                    expandedCard === 'responseBody' &&
+                    expandedViewCard === 'responseBody' &&
                     !selectedEvent.hasResponseBody() &&
                     !selectedEvent.responseBreakpoint
                 ) ||
                 (
-                    expandedCard === 'webSocketMessages' &&
-                    !selectedEvent.isWebSocket()
+                    expandedViewCard === 'webSocketMessages' &&
+                    !(selectedEvent.isWebSocket() && selectedEvent.wasAccepted())
                 )
             ) {
                 runInAction(() => {
-                    this.props.uiStore.expandedCard = undefined;
+                    this.props.uiStore.expandedViewCard = undefined;
                 });
                 return;
             }
@@ -217,17 +292,26 @@ class ViewPage extends React.Component<ViewPageProps> {
         );
     }
 
+    isSendAvailable() {
+        return versionSatisfies(serverVersion.value as string, SERVER_SEND_API_SUPPORTED);
+    }
+
     render(): JSX.Element {
         const { isPaused, events } = this.props.eventsStore;
         const { certPath } = this.props.proxyStore;
+        const { isPaidUser } = this.props.accountStore;
 
         const { filteredEvents, filteredEventCount } = this.filteredEventState;
 
-        let rightPane: JSX.Element;
+        let rightPane: JSX.Element | null;
         if (!this.selectedEvent) {
-            rightPane = <EmptyState icon={['fas', 'arrow-left']}>
-                Select an exchange to see the full details.
-            </EmptyState>;
+            if (this.splitDirection === 'vertical') {
+                rightPane = <EmptyState key='details' icon='ArrowLeft'>
+                    Select an exchange to see the full details.
+                </EmptyState>;
+            } else {
+                rightPane = null;
+            }
         } else if (this.selectedEvent.isHttp()) {
             rightPane = <HttpDetailsPane
                 exchange={this.selectedEvent}
@@ -239,11 +323,21 @@ class ViewPage extends React.Component<ViewPageProps> {
                 navigate={this.props.navigate}
                 onDelete={this.onDelete}
                 onScrollToEvent={this.onScrollToCenterEvent}
+                onBuildRuleFromExchange={this.onBuildRuleFromExchange}
+                onPrepareToResendRequest={this.isSendAvailable()
+                    // Only show Send if flag is enabled & server is up to date
+                    ? this.onPrepareToResendRequest
+                    : undefined
+                }
             />;
-        } else if (this.selectedEvent.isTLSFailure()) {
+        } else if (this.selectedEvent.isTlsFailure()) {
             rightPane = <TlsFailureDetailsPane
                 failure={this.selectedEvent}
                 certPath={certPath}
+            />;
+        } else if (this.selectedEvent.isTlsTunnel()) {
+            rightPane = <TlsTunnelDetailsPane
+                tunnel={this.selectedEvent}
             />;
         } else if (this.selectedEvent.isRTCDataChannel()) {
             rightPane = <RTCDataChannelDetailsPane
@@ -267,21 +361,30 @@ class ViewPage extends React.Component<ViewPageProps> {
             throw new UnreachableCheck(this.selectedEvent);
         }
 
+        const minSize = this.splitDirection === 'vertical'
+            ? 300
+            : 200;
+
         return <div className={this.props.className}>
             <ViewPageKeyboardShortcuts
+                isPaidUser={isPaidUser}
                 selectedEvent={this.selectedEvent}
                 moveSelection={this.moveSelection}
                 onPin={this.onPin}
+                onResend={this.onPrepareToResendRequest}
+                onBuildRuleFromExchange={this.onBuildRuleFromExchange}
                 onDelete={this.onDelete}
                 onClear={this.onForceClear}
                 onStartSearch={this.onStartSearch}
             />
+
             <SplitPane
-                split='vertical'
+                split={this.splitDirection}
                 primary='second'
                 defaultSize='50%'
-                minSize={300}
-                maxSize={-300}
+                minSize={minSize}
+                maxSize={-minSize}
+                hiddenPane={rightPane === null ? '2' : undefined}
             >
                 <LeftPane>
                     <ViewEventListFooter // Footer above the list to ensure correct tab order
@@ -302,15 +405,21 @@ class ViewPage extends React.Component<ViewPageProps> {
                         moveSelection={this.moveSelection}
                         onSelected={this.onSelected}
 
+                        contextMenuBuilder={this.contextMenuBuilder}
+
                         ref={this.listRef}
                     />
                 </LeftPane>
-                { rightPane }
+                {
+                    rightPane ?? <div />
+                    // The <div/> is hidden by hiddenPane, so does nothing, but avoids
+                    // a React error in react-split-pane for undefined children
+                }
             </SplitPane>
 
             {Object.values(this.editors).map((node, i) =>
                 <portals.InPortal key={i} node={node}>
-                    <ThemedSelfSizedEditor
+                    <SelfSizedEditor
                         contentId={null}
                     />
                 </portals.InPortal>
@@ -355,8 +464,29 @@ class ViewPage extends React.Component<ViewPageProps> {
     }
 
     @action.bound
-    onPin(event: HttpExchange) {
+    onPin(event: CollectedEvent) {
         event.pinned = !event.pinned;
+    }
+
+    @action.bound
+    onBuildRuleFromExchange(exchange: HttpExchange) {
+        const { rulesStore, navigate } = this.props;
+
+        if (!this.props.accountStore!.isPaidUser) return;
+
+        const rule = buildRuleFromExchange(exchange);
+        rulesStore!.draftRules.items.unshift(rule);
+        navigate(`/modify/${rule.id}`);
+    }
+
+    @action.bound
+    async onPrepareToResendRequest(exchange: HttpExchange) {
+        const { sendStore, navigate } = this.props;
+
+        if (!this.props.accountStore!.isPaidUser) return;
+
+        await sendStore.addRequestInputFromExchange(exchange);
+        navigate(`/send`);
     }
 
     @action.bound
@@ -449,7 +579,15 @@ const LeftPane = styled.div`
 
 const StyledViewPage = styled(
     // Exclude stores etc from the external props, as they're injected
-    ViewPage as unknown as WithInjected<typeof ViewPage, 'uiStore' | 'proxyStore' | 'eventsStore' | 'navigate'>
+    ViewPage as unknown as WithInjected<typeof ViewPage,
+        | 'eventsStore'
+        | 'proxyStore'
+        | 'uiStore'
+        | 'accountStore'
+        | 'rulesStore'
+        | 'sendStore'
+        | 'navigate'
+    >
 )`
     height: 100vh;
     position: relative;

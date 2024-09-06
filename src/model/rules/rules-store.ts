@@ -4,7 +4,9 @@ import {
     requestHandlers,
     MOCKTTP_PARAM_REF,
     ProxyConfig,
-    ProxySetting
+    ProxySetting,
+    RuleParameterReference,
+    ProxySettingSource
 } from 'mockttp';
 import * as MockRTC from 'mockrtc';
 
@@ -30,22 +32,21 @@ import {
 } from '../../types';
 import { lazyObservablePromise } from '../../util/observable';
 import { persist, hydrate } from '../../util/mobx-persist/persist';
-import { reportError } from '../../errors';
+import { logError } from '../../errors';
 
 import { AccountStore } from '../account/account-store';
 import { ProxyStore } from '../proxy-store';
-import { EventsStore } from '../events/events-store';
 import { getDesktopInjectedValue } from '../../services/desktop-api';
 import { RTC_RULES_SUPPORTED, WEBSOCKET_RULE_RANGE } from '../../services/service-versions';
 
 import {
-    HtkMockRule,
+    HtkRule,
     isHttpBasedRule,
     isWebSocketRule,
     isRTCRule
 } from './rules';
 import {
-    HtkMockRuleGroup,
+    HtkRuleGroup,
     flattenRules,
     ItemPath,
     isRuleGroup,
@@ -55,9 +56,9 @@ import {
     deleteItemAtPath,
     findItem,
     findItemPath,
-    HtkMockRuleRoot,
+    HtkRuleRoot,
     isRuleRoot,
-    HtkMockItem,
+    HtkRuleItem,
     areItemsEqual,
 } from './rules-structure';
 import {
@@ -69,7 +70,7 @@ import {
 import {
     serializeRules,
     deserializeRules,
-    MockRulesetSchema,
+    HtkRulesetSchema,
     DeserializationArgs
 } from './rule-serialization';
 import { migrateRuleData } from './rule-migrations';
@@ -87,7 +88,7 @@ const clientCertificateSchema = serializr.createSimpleSchema({
     pfx: serializr.custom(encodeBase64, decodeBase64)
 });
 
-const reloadRules = (ruleRoot: HtkMockRuleRoot, rulesStore: RulesStore) => {
+const reloadRules = (ruleRoot: HtkRuleRoot, rulesStore: RulesStore) => {
     return deserializeRules(serializeRules(ruleRoot), { rulesStore });
 };
 
@@ -109,15 +110,13 @@ export class RulesStore {
     constructor(
         private readonly accountStore: AccountStore,
         private readonly proxyStore: ProxyStore,
-        private readonly eventsStore: EventsStore,
-        private readonly jumpToExchange: (exchangeId: string) => void
+        private readonly jumpToExchange: (exchangeId: string) => Promise<HttpExchange>
     ) { }
 
     readonly initialized = lazyObservablePromise(async () => {
         await Promise.all([
             this.accountStore.initialized,
-            this.proxyStore.initialized,
-            this.eventsStore.initialized
+            this.proxyStore.initialized
         ]);
 
         await this.loadSettings();
@@ -181,7 +180,7 @@ export class RulesStore {
                         resolve();
                     } catch (e) {
                         console.log('Failed to activate stored rules', e, JSON.stringify(rules));
-                        reportError('Failed to activate configured ruleset');
+                        logError('Failed to activate configured ruleset');
                         alert(`Configured rules could not be activated, so were reset to default.`);
 
                         this.resetRulesToDefault(); // Should trigger the reaction above again, and thereby resolve().
@@ -216,7 +215,7 @@ export class RulesStore {
                 }
             });
         } catch (e) {
-            reportError(e);
+            logError(e);
         }
 
         if (accountStore.mightBePaidUser) {
@@ -235,7 +234,7 @@ export class RulesStore {
                     JSON.parse(localStorage.getItem('rules-store') ?? '{}')?.rules
                 );
 
-                reportError(err);
+                logError(err);
                 alert(`Could not load rules from last run.\n\n${err}`);
                 // We then continue, which resets the rules exactly as if this was the user's first run.
             });
@@ -294,15 +293,16 @@ export class RulesStore {
     get activePassthroughOptions(): requestHandlers.PassThroughHandlerOptions {
         const options: requestHandlers.PassThroughHandlerOptions = { // Check the type to catch changes
             ignoreHostHttpsErrors: this.whitelistedCertificateHosts,
-            trustAdditionalCAs: this.additionalCaCertificates.map((cert) => ({ cert: cert.rawPEM })),
+            additionalTrustedCAs: this.additionalCaCertificates.map((cert) => ({ cert: cert.rawPEM })),
             clientCertificateHostMap: _.mapValues(this.clientCertificateHostMap, (cert) => ({
                 pfx: Buffer.from(cert.pfx),
                 passphrase: cert.passphrase
             })),
             proxyConfig: this.proxyConfig,
-            lookupOptions: this.accountStore.featureFlags.includes('docker') && this.proxyStore.dnsServers.length
+            lookupOptions: this.proxyStore.dnsServers.length
                 ? { servers: this.proxyStore.dnsServers }
-                : undefined
+                : undefined,
+            simulateConnectionErrors: true
         };
 
         // Clone to ensure we touch & subscribe to everything here
@@ -332,11 +332,14 @@ export class RulesStore {
                 // Localhost proxy config is ignored
                 return 'ignored';
             } else {
-                return systemProxyConfig;
+                return {
+                    ...systemProxyConfig,
+                    additionalTrustedCAs: this.additionalCaCertificates.map((cert) => ({ cert: cert.rawPEM }))
+                };
             }
         } catch (e) {
             console.log("Could not parse proxy", proxyUrl);
-            reportError(e);
+            logError(e);
             return 'unparseable';
         }
     }
@@ -353,13 +356,19 @@ export class RulesStore {
         } else {
             return {
                 proxyUrl: `${this.upstreamProxyType}://${this.upstreamProxyHost!}`,
-                noProxy: this.upstreamNoProxyHosts
+                noProxy: this.upstreamNoProxyHosts,
+                additionalTrustedCAs: this.additionalCaCertificates.map((cert) => ({ cert: cert.rawPEM }))
             };
         }
     }
 
     @computed.struct
-    get proxyConfig(): ProxyConfig {
+    get proxyConfig():
+        | ProxySetting
+        | RuleParameterReference<ProxySettingSource>
+        | Array<ProxySetting | RuleParameterReference<ProxySettingSource>>
+        | undefined
+    {
         const { userProxyConfig } = this;
         const { httpProxyPort } = this.proxyStore;
 
@@ -386,11 +395,11 @@ export class RulesStore {
     @persist('list') @observable
     additionalCaCertificates: Array<ParsedCertificate> = [];
 
-    @persist('object', MockRulesetSchema) @observable
-    rules!: HtkMockRuleRoot;
+    @persist('object', HtkRulesetSchema) @observable
+    rules!: HtkRuleRoot;
 
     @observable
-    draftRules!: HtkMockRuleRoot;
+    draftRules!: HtkRuleRoot;
 
     @action.bound
     saveRules() {
@@ -443,7 +452,7 @@ export class RulesStore {
 
         const activeParent = getItemParentByPath(activeRules, activeRulePath);
         const currentDraftParent = getItemParentByPath(draftRules, draftItemPath);
-        let targetDraftParent = findItem(draftRules, { id: activeParent.id }) as HtkMockRuleGroup;
+        let targetDraftParent = findItem(draftRules, { id: activeParent.id }) as HtkRuleGroup;
 
         if (!targetDraftParent) {
             let missingParents = [activeParent];
@@ -453,7 +462,7 @@ export class RulesStore {
                 const missingParentsActivePath = activeRulePath.slice(0, -missingParents.length);
                 const nextActiveParent = getItemParentByPath(activeRules, missingParentsActivePath);
 
-                const targetDraftParentParent = findItem(draftRules, { id: nextActiveParent.id }) as HtkMockRuleGroup;
+                const targetDraftParentParent = findItem(draftRules, { id: nextActiveParent.id }) as HtkRuleGroup;
 
                 if (targetDraftParentParent) {
                     targetDraftParent = missingParents.reduce(({ draftParent, activeParent }, missingGroup) => {
@@ -550,23 +559,23 @@ export class RulesStore {
         const draftItem = getItemAtPath(draftRules, draftItemPath);
         const draftParent = getItemParentByPath(draftRules, draftItemPath);
 
-        let targetActiveParent = findItem(activeRules, { id: draftParent.id }) as HtkMockRuleGroup;
+        let targetActiveParent = findItem(activeRules, { id: draftParent.id }) as HtkRuleGroup;
         if (!targetActiveParent) {
-            targetActiveParent = this.saveItem(draftItemPath.slice(0, -1)) as HtkMockRuleGroup;
+            targetActiveParent = this.saveItem(draftItemPath.slice(0, -1)) as HtkRuleGroup;
         }
 
         const id = draftItem.id;
         const activeItemPath = findItemPath(activeRules, { id });
 
-        const updatedItem = observable(_.cloneDeep(_.omit(draftItem, 'items')) as HtkMockItem);
+        const updatedItem = observable(_.cloneDeep(_.omit(draftItem, 'items')) as HtkRuleItem);
 
         // When saving a single group, save the group itself, don't change the contents
         if (isRuleGroup(draftItem)) {
             if (activeItemPath) {
-                const activeItem = getItemAtPath(activeRules, activeItemPath) as HtkMockRuleGroup;
-                (updatedItem as HtkMockRuleGroup).items = _.cloneDeep(activeItem.items);
+                const activeItem = getItemAtPath(activeRules, activeItemPath) as HtkRuleGroup;
+                (updatedItem as HtkRuleGroup).items = _.cloneDeep(activeItem.items);
             } else {
-                (updatedItem as HtkMockRuleGroup).items = [];
+                (updatedItem as HtkRuleGroup).items = [];
             }
         }
 
@@ -627,7 +636,7 @@ export class RulesStore {
     }
 
     @action.bound
-    addDraftItem(draftItem: HtkMockItem, targetPath?: ItemPath) {
+    addDraftItem(draftItem: HtkRuleItem, targetPath?: ItemPath) {
         if (!targetPath) {
             // By default, we just append them at the top level
             this.draftRules.items.unshift(draftItem);
@@ -683,9 +692,9 @@ export class RulesStore {
 
     @action.bound
     updateGroupTitle(groupId: string, newTitle: string) {
-        const draftGroup = findItem(this.draftRules, { id: groupId }) as HtkMockRuleGroup;
+        const draftGroup = findItem(this.draftRules, { id: groupId }) as HtkRuleGroup;
         const activeGroup = findItem(this.rules, { id: groupId }) as (
-            HtkMockRuleGroup | undefined
+            HtkRuleGroup | undefined
         );
 
         draftGroup.title = newTitle;
@@ -693,15 +702,15 @@ export class RulesStore {
     }
 
     @action.bound
-    ensureRuleExists(rule: HtkMockItem) {
+    ensureRuleExists(rule: HtkRuleItem) {
         const activeRulePath = findItemPath(this.rules, { id: rule.id });
         const activeRule = activeRulePath
-            ? getItemAtPath(this.rules, activeRulePath) as HtkMockRule
+            ? getItemAtPath(this.rules, activeRulePath) as HtkRule
             : undefined;
 
         const draftRulePath = findItemPath(this.draftRules, { id: rule.id });
         const draftRule = draftRulePath
-            ? getItemAtPath(this.draftRules, draftRulePath) as HtkMockRule
+            ? getItemAtPath(this.draftRules, draftRulePath) as HtkRule
             : undefined;
 
         if (areItemsEqual(rule, activeRule) && areItemsEqual(rule, draftRule)) {
@@ -725,7 +734,7 @@ export class RulesStore {
             this.draftRules.items.push(buildDefaultGroupWrapper([rule]));
             draftDefaultGroupPath = [this.draftRules.items.length - 1];
         } else {
-            const draftDefaultGroup = getItemAtPath(this.draftRules, draftDefaultGroupPath) as HtkMockRuleGroup;
+            const draftDefaultGroup = getItemAtPath(this.draftRules, draftDefaultGroupPath) as HtkRuleGroup;
             draftDefaultGroup.items.unshift(rule);
         }
 
@@ -770,18 +779,8 @@ export class RulesStore {
         eventId: string,
         getEditedEvent: (exchange: HttpExchange) => Promise<T>
     ) {
-        let exchange: HttpExchange | undefined;
-
-        // Wait until the event itself has arrived in the UI:
-        yield when(() => {
-            exchange = _.find(this.eventsStore.exchanges, { id: eventId });
-
-            // Completed -> doesn't fire for initial requests -> no completed/initial req race
-            return !!exchange && exchange.isCompletedRequest();
-        });
-
-        // Jump to the exchange:
-        this.jumpToExchange(eventId);
+        // Jump to the exchange, once the request is completed:
+        const exchange: HttpExchange = yield this.jumpToExchange(eventId);
 
         // Mark the exchange as breakpointed, and wait for an edited version.
         // UI will make it editable, add a save button, save will resolve this promise

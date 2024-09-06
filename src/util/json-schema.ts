@@ -2,7 +2,7 @@ import * as _ from 'lodash';
 import * as traverse from 'traverse';
 import * as Ajv from 'ajv';
 
-import { joinAnd, truncate } from './index';
+import { joinAnd, truncate } from './text';
 
 type Ref = { $ref: string };
 
@@ -24,7 +24,10 @@ function derefRef(root: any, node: Ref) {
     let refTarget: any = root;
 
     while (refParts.length) {
-        const nextPart = refParts.shift() as any;
+        const nextPart = refParts.shift()!
+            // Handle JSON pointer escape chars:
+            .replace(/~1/g, '/')
+            .replace(/~0/g, '~');
         refTarget = refTarget[nextPart];
         if (!refTarget) {
             throw new Error(`Could not follow ref ${ref}, failed at ${nextPart}`);
@@ -61,23 +64,26 @@ export function dereference<T extends object>(root: T): T {
     return root;
 }
 
+const getValue = (root: any, path: string[]): any => {
+    if (path.length === 0) return root;
+    return getValue(root[path[0]], path.slice(1));
+};
+
 export function formatAjvError(
     data: any,
     e: Ajv.ErrorObject,
     pathTransform: (path: string) => string = _.identity
 ) {
-    return (pathTransform(e.dataPath) || 'Document') + ` (${
-        truncate(
-            JSON.stringify(
-                e.dataPath.length
-                    ? _.get(data, e.dataPath.slice(1))
-                    : data
-            )
-        , 50)
+    const value = e.instancePath?.length
+        ? getValue(data, e.instancePath.slice(1).split('/'))
+        : data;
+
+    return (pathTransform(e.instancePath) || 'Document') + ` (${
+        truncate(JSON.stringify(value), 50)
     }) ${e.message!}${
         e.keyword === 'enum' ?
             ` (${joinAnd(
-                (e.params as Ajv.EnumParams).allowedValues, ', ', ', or ')
+                (e.params as any).allowedValues, ', ', ', or ')
             })` :
         ''
     }.`

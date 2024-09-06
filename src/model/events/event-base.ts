@@ -1,7 +1,8 @@
 import { observable, computed } from 'mobx';
 
 import {
-    FailedTLSConnection,
+    FailedTlsConnection,
+    TlsTunnel,
     HttpExchange,
     RTCConnection,
     RTCDataChannel,
@@ -18,7 +19,9 @@ export abstract class HTKEventBase {
     // These can be overriden by subclasses to allow easy type narrowing:
     isHttp(): this is HttpExchange { return false; }
     isWebSocket(): this is WebSocketStream { return false; }
-    isTLSFailure(): this is FailedTLSConnection { return false; }
+
+    isTlsFailure(): this is FailedTlsConnection { return false; }
+    isTlsTunnel(): this is TlsTunnel { return false; }
 
     isRTCConnection(): this is RTCConnection { return false; }
     isRTCDataChannel(): this is RTCDataChannel { return false; }
@@ -34,5 +37,10 @@ export abstract class HTKEventBase {
 
     @observable
     public pinned: boolean = false;
+
+    // Logic elsewhere can put values into these caches to cache calculations
+    // about this event weakly, so they GC with the event.
+    // Keyed by symbols only, so we know we never have conflicts.
+    public cache = observable.map(new Map<symbol, unknown>(), { deep: false });
 
 }

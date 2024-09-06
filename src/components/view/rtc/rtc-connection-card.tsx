@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.tech>
+ * SPDX-FileCopyrightText: 2022 Tim Perry <tim@httptoolkit.com>
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -10,11 +10,12 @@ import { observer } from 'mobx-react';
 
 import { UNKNOWN_SOURCE } from '../../../model/http/sources';
 import { RTCConnection } from '../../../model/webrtc/rtc-connection';
-import { getSummaryColour } from '../../../model/events/categorization';
+import { getSummaryColor } from '../../../model/events/categorization';
 
 import {
     CollapsibleCard,
-    CollapsibleCardHeading
+    CollapsibleCardHeading,
+    ExpandableCardProps
 } from '../../common/card';
 import {
     CollapsibleSection,
@@ -31,12 +32,8 @@ import { SourceIcon } from '../../common/source-icon';
 import { Pill } from '../../common/pill';
 import { UrlBreakdown } from '../url-breakdown';
 
-interface RTCConnectionCardProps {
+interface RTCConnectionCardProps extends ExpandableCardProps {
     connection: RTCConnection;
-
-    collapsed: boolean;
-    expanded: boolean;
-    onExpandToggled: () => void;
     onCollapseToggled?: () => void;
 };
 
@@ -73,15 +70,15 @@ export class RTCConnectionCard extends React.Component<RTCConnectionCardProps> {
                 <SourceIcon source={connection.source} />
 
                 { this.hasData &&
-                    <Pill color={getSummaryColour('data')}>Data</Pill>
+                    <Pill color={getSummaryColor('data')}>Data</Pill>
                 }
 
                 { this.hasVideo &&
-                    <Pill color={getSummaryColour('image')}>Video</Pill>
+                    <Pill color={getSummaryColor('image')}>Video</Pill>
                 }
 
                 { this.hasAudio &&
-                    <Pill color={getSummaryColour('css')}>Audio</Pill>
+                    <Pill color={getSummaryColor('css')}>Audio</Pill>
                 }
 
                 <CollapsibleCardHeading onCollapseToggled={cardProps.onCollapseToggled}>

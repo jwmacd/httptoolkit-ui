@@ -9,6 +9,8 @@ import {
 } from 'mockttp';
 
 import { styled } from '../../../styles';
+import { stringToBuffer } from '../../../util/buffer';
+import { logError } from '../../../errors';
 
 import { Interceptor } from '../../../model/interception/interceptors';
 import { ProxyStore } from '../../../model/proxy-store';
@@ -19,6 +21,7 @@ import {
     StaticResponseHandler
 } from '../../../model/rules/definitions/http-rule-definitions';
 import { RulesStore } from '../../../model/rules/rules-store';
+import { RulePriority } from '../../../model/rules/rules';
 
 const ConfigContainer = styled.div`
     user-select: text;
@@ -61,9 +64,10 @@ const Spacer = styled.div`
 `;
 
 function urlSafeBase64(content: string) {
-    return Buffer.from(content, 'utf8').toString('base64')
-        .replace('+', '-')
-        .replace('/', '_');
+    return stringToBuffer(content)
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_');
 }
 
 function getConfigRequestIds(eventsStore: EventsStore) {
@@ -82,6 +86,7 @@ export function setUpAndroidCertificateRule(
         id: 'default-android-certificate',
         type: 'http',
         activated: true,
+        priority: RulePriority.OVERRIDE,
         matchers: [
             new MethodMatchers.GET(),
             new matchers.SimplePathMatcher(
@@ -136,6 +141,21 @@ class AndroidConfig extends React.Component<{
 
         const { reportStarted, reportSuccess } = this.props;
 
+        // Just in case the network addresses have changed:
+        proxyStore.refreshNetworkAddresses().then(() => {
+            // This should never happen, but plausibly could in some edge cases, in which case we need
+            // to clearly tell the user what's going on here:
+            if (proxyStore.externalNetworkAddresses.length === 0) {
+                alert(
+                    "Cannot activate Android interception as no network addresses could be detected." +
+                    "\n\n" +
+                    "Please open an issue at github.com/httptoolkit/httptoolkit"
+                );
+                logError("Android QR activation failed - no network addresses");
+                this.props.closeSelf();
+            }
+        });
+
         setUpAndroidCertificateRule(
             proxyStore!.certContent!,
             rulesStore,
@@ -146,9 +166,6 @@ class AndroidConfig extends React.Component<{
                 ? reportSuccess
                 : () => reportSuccess({ showRequests: false })
         );
-
-        // Just in case the network addresses have changed:
-        proxyStore.refreshNetworkAddresses();
 
         // We consider activate attempted once you show the QR code
         reportStarted();
@@ -204,7 +221,7 @@ class AndroidConfig extends React.Component<{
             <p>
                 <strong>This won't work immediately for all apps.</strong> Some may need changes
                 to trust HTTP Toolkit for HTTPS traffic. <a
-                    href="https://httptoolkit.tech/docs/guides/android"
+                    href="https://httptoolkit.com/docs/guides/android"
                     target='_blank'
                     rel='noreferrer noopener'
                 >
